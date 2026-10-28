@@ -8,6 +8,7 @@ const FILES: &[(&str, &str)] = &[
     ("execute.md", include_str!("../docs/execute.md")),
     ("components.md", include_str!("../docs/components.md")),
     ("layout.md", include_str!("../docs/layout.md")),
+    ("scripts-and-shaders.md", include_str!("../docs/scripts-and-shaders.md")),
 ];
 
 pub fn read(path: Option<&str>) -> String {
@@ -26,7 +27,7 @@ pub fn read(path: Option<&str>) -> String {
 pub fn app_state_docs() -> String {
     let skill = FILES[0].1.split("---").nth(2).unwrap_or(FILES[0].1).trim();
     format!(
-        "# study documentation\n\n{skill}\n\n{}\n\n{}\n\nMore: read_skill({{path: \"components.md\"}}), read_skill({{path: \"layout.md\"}}).\n",
+        "# study documentation\n\n{skill}\n\n{}\n\n{}\n\nMore: read_skill({{path: \"components.md\"}}), read_skill({{path: \"layout.md\"}}), read_skill({{path: \"scripts-and-shaders.md\"}}).\n",
         FILES[2].1.trim(),
         FILES[1].1.trim()
     )

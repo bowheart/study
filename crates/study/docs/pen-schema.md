@@ -36,8 +36,9 @@ type Fill =
     }
   /** url is relative to the .pen file. mode: "fill" (cover, default), "fit" (contain), "stretch". */
   | { type: "image"; url: string; mode?: "stretch" | "fill" | "fit"; opacity?: Num; enabled?: Bool; blendMode?: BlendMode }
-  /** WebGL 1 fragment shader file (relative url). Uniforms annotated `@resolution` / `@time` are bound
-   *  automatically; others take values from `uniforms` (number, bool, "#hex" color, number array, or "$var"). */
+  /** WebGL 1 fragment shader file (relative url). Uniforms annotated `@resolution` / `@time` / `@mouse` are bound
+   *  automatically; others take values from `uniforms` (number, bool, "#hex" color, number array, "$var",
+   *  or an image url for sampler2D). See scripts-and-shaders.md. */
   | { type: "shader"; url: string; uniforms?: Record<string, number | boolean | string | number[]>; opacity?: Num; enabled?: Bool; blendMode?: BlendMode }
   | { type: "mesh_gradient"; columns?: number; rows?: number; colors?: Color[]; points?: [number, number][]; opacity?: Num; enabled?: Bool };
 type Fills = Fill | Fill[];   // arrays paint bottom to top
@@ -155,7 +156,7 @@ interface Ref extends Base {
 }
 
 interface Note extends Base, TextStyle { type: "note" | "prompt" | "context"; content?: string | Var; width?: Size; height?: Size; model?: string }
-interface Script extends Base { type: "script"; scriptUri?: string; inputs?: Record<string, any>; width?: Size; height?: Size; clip?: Bool }
+interface Script extends Base { type: "script"; scriptUri?: string; inputs?: Record<string, any>; width?: Size; height?: Size; clip?: Bool }   // see scripts-and-shaders.md
 
 type Node = Frame | Group | Rectangle | Ellipse | Polygon | Path | Text | Icon | Ref | Note | Script;
 

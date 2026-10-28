@@ -2,7 +2,7 @@
 
 use crate::engine::Engine;
 use crate::shot::{region_of, render};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -13,19 +13,18 @@ pub fn export(engine: &mut Engine, ids: &[String], format: &str, output: &str, o
     let scale = opts.get("scale").and_then(Value::as_f64).unwrap_or(2.0) as f32;
     let quality = opts.get("quality").and_then(Value::as_u64).map(|q| q.clamp(1, 100) as u32);
     match format {
-        "png" | "jpeg" => {
+        "png" | "jpeg" | "webp" => {
             std::fs::create_dir_all(&out)?;
             let mut files = Vec::new();
             for id in ids {
                 let region = region_of(engine, id)?;
                 let bytes = render(engine, region, scale, format, quality)?;
-                let file = out.join(format!("{}.{}", id.replace('/', "_"), if format == "jpeg" { "jpg" } else { "png" }));
+                let file = out.join(format!("{}.{}", id.replace('/', "_"), match format { "jpeg" => "jpg", f => f }));
                 std::fs::write(&file, bytes)?;
                 files.push(file.display().to_string());
             }
             Ok(files)
         }
-        "webp" => bail!("webp export isn't available in this build of study; use png or jpeg"),
         "pdf" => {
             std::fs::create_dir_all(&out)?;
             let file = out.join("export.pdf");

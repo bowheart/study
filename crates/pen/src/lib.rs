@@ -1,4 +1,5 @@
 pub mod doc;
+pub mod imports;
 pub mod instance;
 pub mod json;
 pub mod layout;

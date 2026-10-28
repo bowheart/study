@@ -2,7 +2,7 @@
 
 use crate::icons::is_font_library;
 use crate::images::Images;
-use crate::shaders::Shaders;
+use crate::shaders::{Built, Ctx, Shaders};
 use crate::text::TextEngine;
 use crate::Icons;
 use pen::scene::{Kind, NoteKind, Rect, RootScene, SNode};
@@ -15,7 +15,7 @@ use skia_safe::{
     image_filters, BlurStyle, Canvas, ClipOp, Color, Color4f, MaskFilter, Matrix, Paint as SkPaint, PaintStyle, Path,
     PathBuilder, PathDirection, PathFillType, Point, RRect, Rect as SkRect, SamplingOptions, Shader, TileMode,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// Below this on-screen size (px), containers are drawn as a single flat rect.
@@ -60,6 +60,12 @@ pub struct Renderer {
     pub reveal: HashMap<u32, HashMap<u32, f32>>,
     /// Pen tips of in-progress reveals this frame: device position and direction.
     pub tips: Vec<(Point, Point)>,
+    /// Pointer position in device pixels, for `@mouse` shaders.
+    pub mouse: Option<Point>,
+    sdfs: HashMap<(u64, u32, u32), Option<skia_safe::Image>>,
+    /// Roots with time- or pointer-driven shaders: never drawn from cached thumbnails.
+    animated: HashSet<u32>,
+    current_root: Option<u32>,
 }
 
 /// A cached raster of a whole top-level frame, used when it is small on screen.
@@ -101,6 +107,12 @@ impl Shape {
             }
         }
     }
+    fn path(&self) -> Path {
+        match self {
+            Shape::RRect(r) => Path::rrect(*r, None),
+            Shape::Path(p) => p.clone(),
+        }
+    }
     fn is_closed_area(&self) -> bool {
         true
     }
@@ -124,6 +136,10 @@ impl Renderer {
             fine: false,
             reveal: HashMap::new(),
             tips: Vec::new(),
+            mouse: None,
+            sdfs: HashMap::new(),
+            animated: HashSet::new(),
+            current_root: None,
         }
     }
 
@@ -162,6 +178,8 @@ impl Renderer {
         self.drawn = 0;
         self.needs_redraw = false;
         self.tips.clear();
+        self.shaders.uses_time = false;
+        self.shaders.uses_mouse = false;
         self.thumb_budget = Some(std::time::Instant::now() + THUMB_BUDGET);
     }
 
@@ -174,7 +192,8 @@ impl Renderer {
             return;
         }
         let on_screen = b.w.max(b.h) * view.scale;
-        if view.lod && self.thumb_budget.is_some() && on_screen < THUMB_MAX_PX && on_screen > LOD_FLATTEN_PX && scene.nodes.len() > 64 && !self.revealing(scene) {
+        self.current_root = scene.doc_root.map(|r| r.0);
+        if view.lod && self.thumb_budget.is_some() && on_screen < THUMB_MAX_PX && on_screen > LOD_FLATTEN_PX && scene.nodes.len() > 64 && !self.revealing(scene) && !self.current_root.is_some_and(|r| self.animated.contains(&r)) {
             if self.draw_thumb(canvas, scene, view) {
                 return;
             }
@@ -324,9 +343,7 @@ impl Renderer {
             self.outer_shadows(canvas, n, shape);
             self.background_blur(canvas, n, shape);
             for f in &n.fills {
-                if let Some(p) = self.sk_paint(f, w, h) {
-                    shape.draw(canvas, &p);
-                }
+                self.fill(canvas, f, shape, w, h);
             }
             self.inner_shadows(canvas, n, shape);
         }
@@ -335,7 +352,7 @@ impl Renderer {
             Kind::Text(t) => self.text_content(canvas, n, t, view),
             Kind::Icon { library, name, weight } => self.icon(canvas, n, library, name, *weight),
             Kind::Note(kind, t) => self.note(canvas, n, *kind, t),
-            Kind::Missing | Kind::Script => {
+            Kind::Missing => {
                 let mut p = SkPaint::new(Color4f::new(0.9, 0.3, 0.3, 0.6), None);
                 p.set_style(PaintStyle::Stroke);
                 p.set_stroke_width(1.0 / view.scale);
@@ -391,9 +408,7 @@ impl Renderer {
         if fill > 0.0 {
             canvas.save_layer_alpha_f(None, fill);
             for f in &n.fills {
-                if let Some(p) = self.sk_paint(f, w, h) {
-                    shape.draw(canvas, &p);
-                }
+                self.fill(canvas, f, shape, w, h);
             }
             canvas.restore();
         }
@@ -461,7 +476,8 @@ impl Renderer {
                 p.set_fill_type(if *even_odd { PathFillType::EvenOdd } else { PathFillType::Winding });
                 Shape::Path(p)
             }
-            Kind::Missing | Kind::Script => Shape::RRect(RRect::new_rect(r)),
+            Kind::Missing => Shape::RRect(RRect::new_rect(r)),
+            Kind::Script { .. } => return None,
             Kind::Text(_) | Kind::Icon { .. } | Kind::Group => return None,
         })
     }
@@ -499,13 +515,18 @@ impl Renderer {
                 out.set_blend_mode(sk_blend(*blend));
             }
             Paint::Shader { url, uniforms, opacity, blend } => {
+                // Strokes and other non-fill uses: no SDF, no backdrop.
                 let path = PathBuf::from(self.resolve_url(url));
-                out.set_shader(self.shaders.shader(path, uniforms, w, h)?);
+                let (base, images) = (self.base_dir.clone(), &mut self.images);
+                let mut image = |u: &str| images.get(&resolve(&base, u));
+                let ctx = Ctx { w, h, mouse: None, image: &mut image, sdf: &mut || None };
+                let Built::Shader(s) = self.shaders.shader(path, uniforms, ctx)? else { return None };
+                out.set_shader(s);
                 out.set_alpha_f(*opacity);
                 out.set_blend_mode(sk_blend(*blend));
             }
             Paint::Mesh { columns, colors, opacity, blend, .. } => {
-                // Approximation: a 2-stop diagonal gradient through the corner colors.
+                // Only for strokes; fills draw real patches (`mesh_fill`).
                 let first = *colors.first()?;
                 let last = *colors.last()?;
                 let cols = (*columns).max(1) as usize;
@@ -519,14 +540,73 @@ impl Renderer {
     }
 
     fn resolve_url(&self, url: &str) -> String {
-        if url.starts_with("http://") || url.starts_with("https://") {
-            return url.to_string();
+        resolve(&self.base_dir, url)
+    }
+
+    /// One fill of a shape. Shaders and mesh gradients need more than a paint.
+    fn fill(&mut self, canvas: &Canvas, f: &Paint, shape: &Shape, w: f32, h: f32) {
+        match f {
+            Paint::Shader { url, uniforms, opacity, blend } => self.shader_fill(canvas, url, uniforms, *opacity, *blend, shape, w, h),
+            Paint::Mesh { columns, rows, colors, points, opacity, blend } => {
+                canvas.save();
+                shape.clip(canvas, ClipOp::Intersect);
+                mesh(canvas, *columns, *rows, colors, points, *opacity, *blend, w, h);
+                canvas.restore();
+            }
+            _ => {
+                if let Some(p) = self.sk_paint(f, w, h) {
+                    shape.draw(canvas, &p);
+                }
+            }
         }
-        let p = std::path::Path::new(url);
-        if p.is_absolute() {
-            return url.to_string();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn shader_fill(&mut self, canvas: &Canvas, url: &str, uniforms: &[(String, Uniform)], opacity: f32, blend: BlendMode, shape: &Shape, w: f32, h: f32) {
+        let path = PathBuf::from(self.resolve_url(url));
+        let to_device = canvas.local_to_device_as_3x3();
+        let mouse = self.mouse.and_then(|d| to_device.invert().map(|m| m.map_point(d))).map(|p| (p.x, p.y));
+        let outline = shape.path();
+        let sdf_key = (hash_str(&outline.to_svg()), w.to_bits(), h.to_bits());
+        let (base, images, sdfs) = (self.base_dir.clone(), &mut self.images, &mut self.sdfs);
+        let mut image = |u: &str| images.get(&resolve(&base, u));
+        let mut sdf = || sdfs.entry(sdf_key).or_insert_with(|| crate::shaders::sdf_image(&outline, w, h)).clone();
+        let (time, mouse_used) = (std::mem::take(&mut self.shaders.uses_time), std::mem::take(&mut self.shaders.uses_mouse));
+        let built = self.shaders.shader(path, uniforms, Ctx { w, h, mouse, image: &mut image, sdf: &mut sdf });
+        if self.shaders.uses_time || self.shaders.uses_mouse {
+            if let Some(r) = self.current_root {
+                self.animated.insert(r);
+            }
         }
-        self.base_dir.join(url).to_string_lossy().to_string()
+        self.shaders.uses_time |= time;
+        self.shaders.uses_mouse |= mouse_used;
+        match built {
+            Some(Built::Shader(s)) => {
+                let mut p = SkPaint::default();
+                p.set_anti_alias(true);
+                p.set_shader(s);
+                p.set_alpha_f(opacity);
+                p.set_blend_mode(sk_blend(blend));
+                shape.draw(canvas, &p);
+            }
+            Some(Built::Backdrop { mut builder, child }) => {
+                // The filter runs in device space; the shader works in the node's local space.
+                let Some(to_local) = to_device.invert() else { return };
+                let _ = builder.set_uniform_float("study_to_local", &mat3(&to_local));
+                let _ = builder.set_uniform_float("study_from_local", &mat3(&to_device));
+                let Some(filter) = image_filters::runtime_shader(&builder, &child, None) else { return };
+                canvas.save();
+                shape.clip(canvas, ClipOp::Intersect);
+                let mut lp = SkPaint::default();
+                lp.set_alpha_f(opacity);
+                lp.set_blend_mode(sk_blend(blend));
+                let bounds = SkRect::from_wh(w, h);
+                canvas.save_layer(&SaveLayerRec::default().bounds(&bounds).backdrop(&filter).paint(&lp));
+                canvas.restore();
+                canvas.restore();
+            }
+            None => {}
+        }
     }
 
     // ------------------------------------------------------------------ strokes
@@ -961,4 +1041,69 @@ fn blit(canvas: &Canvas, img: &skia_safe::Image, b: Rect) {
         SamplingOptions::new(skia_safe::FilterMode::Linear, skia_safe::MipmapMode::None),
         &p,
     );
+}
+
+fn resolve(base: &std::path::Path, url: &str) -> String {
+    if url.starts_with("http://") || url.starts_with("https://") || std::path::Path::new(url).is_absolute() {
+        return url.to_string();
+    }
+    base.join(url).to_string_lossy().to_string()
+}
+
+/// A Skia matrix as an SkSL `float3x3` uniform (column-major).
+fn mat3(m: &Matrix) -> [f32; 9] {
+    [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]
+}
+
+/// A mesh gradient: a grid of Coons patches through the vertices, with explicit Bezier handles
+/// where given and smooth (Catmull-Rom) ones elsewhere. Points and handles are normalized.
+#[allow(clippy::too_many_arguments)]
+fn mesh(canvas: &Canvas, columns: u32, rows: u32, colors: &[Rgba], points: &[MeshPoint], opacity: f32, blend: BlendMode, w: f32, h: f32) {
+    let (cols, rows) = (columns.max(2) as usize, rows.max(2) as usize);
+    let grid: Vec<MeshPoint> = if points.len() == cols * rows {
+        points.to_vec()
+    } else {
+        (0..rows * cols)
+            .map(|i| MeshPoint { pos: [(i % cols) as f32 / (cols - 1) as f32, (i / cols) as f32 / (rows - 1) as f32], ..Default::default() })
+            .collect()
+    };
+    let at = |c: usize, r: usize| grid[r * cols + c];
+    let px = |p: [f32; 2]| Point::new(p[0] * w, p[1] * h);
+    let pos = |c: usize, r: usize| px(at(c, r).pos);
+    // Tangent along a row (dx) or column (dy) for auto handles.
+    let tangent = |c: usize, r: usize, horizontal: bool| -> Point {
+        let (prev, next) = if horizontal {
+            (pos(c.saturating_sub(1), r), pos((c + 1).min(cols - 1), r))
+        } else {
+            (pos(c, r.saturating_sub(1)), pos(c, (r + 1).min(rows - 1)))
+        };
+        let span = if horizontal { (c + 1).min(cols - 1) - c.saturating_sub(1) } else { (r + 1).min(rows - 1) - r.saturating_sub(1) };
+        (next - prev) * (1.0 / (3.0 * span.max(1) as f32))
+    };
+    let handle = |c: usize, r: usize, explicit: Option<[f32; 2]>, horizontal: bool, sign: f32| -> Point {
+        match explicit {
+            Some(o) => pos(c, r) + Point::new(o[0] * w, o[1] * h),
+            None => pos(c, r) + tangent(c, r, horizontal) * sign,
+        }
+    };
+    let right = |c, r| handle(c, r, at(c, r).right, true, 1.0);
+    let left = |c, r| handle(c, r, at(c, r).left, true, -1.0);
+    let bottom = |c, r| handle(c, r, at(c, r).bottom, false, 1.0);
+    let top = |c, r| handle(c, r, at(c, r).top, false, -1.0);
+    let color = |c: usize, r: usize| c4(colors.get(r * cols + c).copied().unwrap_or(Rgba([0.5, 0.5, 0.5, 1.0]))).to_color();
+    let mut paint = SkPaint::new(Color4f::new(1.0, 1.0, 1.0, opacity), None);
+    paint.set_anti_alias(true);
+    paint.set_blend_mode(sk_blend(blend));
+    for r in 0..rows - 1 {
+        for c in 0..cols - 1 {
+            let cubics = [
+                pos(c, r), right(c, r), left(c + 1, r), pos(c + 1, r),
+                bottom(c + 1, r), top(c + 1, r + 1), pos(c + 1, r + 1),
+                left(c + 1, r + 1), right(c, r + 1), pos(c, r + 1),
+                top(c, r + 1), bottom(c, r),
+            ];
+            let cs = [color(c, r), color(c + 1, r), color(c + 1, r + 1), color(c, r + 1)];
+            canvas.draw_patch(&cubics, &cs, None, skia_safe::BlendMode::Modulate, &paint);
+        }
+    }
 }

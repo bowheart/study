@@ -158,6 +158,8 @@ pub enum Uniform {
     Bool(bool),
     Color(Rgba),
     Vec(Vec<f32>),
+    /// A string that isn't a color: an image URL for `sampler2D` uniforms.
+    Text(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -191,7 +193,7 @@ pub enum Paint {
         columns: u32,
         rows: u32,
         colors: Vec<Rgba>,
-        points: Vec<[f32; 2]>,
+        points: Vec<MeshPoint>,
         opacity: f32,
         blend: BlendMode,
     },
@@ -371,4 +373,15 @@ pub fn parse_sizing(v: Option<&Value>, default: Sizing) -> Sizing {
         }
         _ => default,
     }
+}
+
+/// A mesh gradient vertex: position in the node's normalized box and optional Bezier handles
+/// (offsets relative to the position, also normalized). Missing handles are generated smoothly.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct MeshPoint {
+    pub pos: [f32; 2],
+    pub left: Option<[f32; 2]>,
+    pub right: Option<[f32; 2]>,
+    pub top: Option<[f32; 2]>,
+    pub bottom: Option<[f32; 2]>,
 }

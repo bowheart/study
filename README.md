@@ -20,14 +20,37 @@ gives Claude Code the same MCP tools Pen does (`get_app_state`, `execute`, `read
 - **No app babysitting.** Claude can edit any `.pen` file whether or not study is open; study
   opens a window for it, and everything is saved as it goes.
 - **Drawing.** Claude can draw vector art (logos, illustrations) and you watch a pen trace it onto
-  the canvas. When Claude reads part of a design, a scan line sweeps over it.
+  the canvas. When Claude reads part of a design a scan line sweeps over it, and frames it is
+  changing glow with a "Claude is working" badge until it goes quiet.
+- **The whole format.** Components and imports from other files, variables and themes, `script`
+  nodes that generate content, WebP images, mesh gradients, and shader fills including animated
+  (`@time`), interactive (`@mouse`), textured, SDF and backdrop shaders.
 
-Windows only for now.
+macOS (Apple Silicon) and Windows.
 
 ## Install
 
-You need [Rust](https://rustup.rs) with the default MSVC toolchain (Visual Studio Build Tools).
-The first build downloads prebuilt Skia binaries and takes a few minutes.
+### macOS
+
+```bash
+curl -fsSL https://github.com/bowheart/study/releases/latest/download/study-macos-arm64.tar.gz | tar -xz -C /Applications
+```
+
+This installs `/Applications/Study.app`. The app isn't signed with an Apple Developer ID, so
+install it with the command above: files downloaded by a browser get quarantined and macOS refuses
+to open them ("can't be checked for malicious software"). If that happens, run
+`xattr -dr com.apple.quarantine /Applications/Study.app`. Run the same command to update.
+
+### Windows
+
+Download `study-windows-x64.zip` from the [latest release](https://github.com/bowheart/study/releases/latest),
+extract `study.exe` somewhere permanent (for example `%LOCALAPPDATA%\Programs\study`), and add that
+folder to your PATH. The exe is unsigned, so Windows SmartScreen asks once before the first run.
+
+### From source
+
+You need [Rust](https://rustup.rs) (on Windows, the default MSVC toolchain with Visual Studio
+Build Tools). The first build downloads prebuilt Skia binaries and takes a few minutes.
 
 ```bash
 git clone https://github.com/bowheart/study.git
@@ -35,11 +58,11 @@ cd study
 cargo install --path crates/study
 ```
 
-This puts `study.exe` in `~/.cargo/bin` (already on your PATH if you installed Rust with rustup).
-Run the same command after pulling updates. If study is running, Windows won't let the file be
-replaced; close study first, or rename the old `study.exe` out of the way (a running exe can be renamed).
+This puts `study` in `~/.cargo/bin` (on your PATH if you installed Rust with rustup). Run the
+same command after pulling updates. On Windows a running `study.exe` can't be replaced; close
+study first, or rename the old exe out of the way (a running exe can be renamed).
 
-Optional Start menu entry (also lets Claude's computer-use tools find the app):
+Optional Windows Start menu entry (also lets Claude's computer-use tools find the app):
 
 ```powershell
 $s = (New-Object -ComObject WScript.Shell).CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\study.lnk"); $s.TargetPath = "$env:USERPROFILE\.cargo\bin\study.exe"; $s.Save()
@@ -57,6 +80,12 @@ claude mcp remove pencil --scope user
 
 ```bash
 claude mcp add pencil --scope user -- study mcp
+```
+
+On macOS with the app from a release, use the full path:
+
+```bash
+claude mcp add pencil --scope user -- /Applications/Study.app/Contents/MacOS/study mcp
 ```
 
 Tools then appear as `mcp__pencil__execute` and so on, exactly as before, and an existing
@@ -91,6 +120,8 @@ This works, but Claude then sees two near-identical tool sets and may pick the w
 study path/to/design.pen
 ```
 
+On macOS use Cmd wherever the table says Ctrl.
+
 | Input | Action |
 | --- | --- |
 | Middle-drag, or Space + drag | Pan |
@@ -120,7 +151,11 @@ your optional `styles/`. Deleting it is safe.
 
 - Image generation and stock photos (`Generate` with `"ai"` / `"stock"`), and Pen's `browser` tool.
 - Pen's manual editing tools, panels, in-app chat, presets, sharing, presenting and Figma import.
-- `script` nodes (drawn as placeholders), `imports` of other `.pen` files, WebP images and exports.
-- Animated shaders (`@time` uniforms) render as a still frame.
+- Script nodes that use `Math.random()` produce the same *kind* of output as in Pen but not the
+  identical shapes (the random seed differs).
+- `imports`: Pen doesn't document how references into imported files are written. study accepts
+  `alias:id` refs and `$alias:name` variables (and bare ids/names found in an import) — tell me if
+  a file with imports renders with missing pieces. Pen's built-in `pencil:` libraries load only
+  when Pen itself is installed on the machine.
 
 study is an independent personal project and is not affiliated with Pen.

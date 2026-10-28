@@ -39,6 +39,15 @@ style (variables and themes applied, instances expanded) plus computed rects and
   `type` replaces the node; `children` replaces its children. Instance children get path keys
   like `inst/child` (that's how `execute` addresses them).
 - Legacy forms still found in files: stroke objects `{align, thickness, fill}`, `icon_font` nodes.
+- Imports (`imports.rs`): the header's `imports` maps aliases to other files (relative, percent-
+  encoded) or `pencil:<kit>.lib.pen` (read straight out of a local Pen install's `app.asar`). Every
+  node of an import is pre-serialized as `alias:id` with nested refs and `$vars` rewritten to
+  `alias:...`; refs that miss locally compile from that JSON. Variables are merged into `Vars` as
+  `alias:name`. Pen's own reference syntax is undocumented; bare ids/names that exist in an import
+  also resolve.
+- Script nodes compile as empty containers (`Kind::Script`). After layout the engine runs each
+  script with its laid-out size (`study::scripts`) and `graft`s the returned JSON in as children
+  (no ids, so not addressable or selectable), then lays out again.
 - Layout (`layout.rs`), Pen semantics: frames default to `layout: "horizontal"`, sizes default to
   fit content. Widths resolve first, then heights (text wrapping depends on width), then positions.
   `fill_container` children contribute 0 to a `fit_content` parent; if every child fills, the parent
@@ -62,8 +71,16 @@ style (variables and themes applied, instances expanded) plus computed rects and
   `~/.study/icons`; SVG DOMs cached by (library, name, color). Material Symbols are font ligatures.
 - Shaders: Pen's WebGL1 fragment shaders are translated to SkSL (`shaders.rs`): strip `precision`/`#`
   lines, rename `gl_FragCoord`/`gl_FragColor` (reserved in SkSL), wrap `main`, flip y, rename
-  locals that shadow builtins (`float dot = ...`). Uniform annotations `@resolution`, `@time`,
-  `@default` are parsed from doc comments. `@time` is fixed at 0.
+  locals that shadow builtins (`float dot = ...`). Annotations: `@resolution`, `@time` (live clock,
+  roots using it are redrawn continuously and never thumbnailed), `@mouse`, `@default`. `sampler2D`
+  uniforms become child shaders with a `study_size_<name>` uniform and a `study_tex_<name>(uv)`
+  helper replacing `texture2D` (y flipped, unpremultiplied); `textureSize` maps to the size uniform.
+  `@sdf` is a half-float RGBA image from an exact distance transform of the shape (32-bit float
+  textures don't work on the GPU backend). `@backdrop` shaders run as a backdrop image filter in
+  device space; `study_to_local`/`study_from_local` matrices map between device and node space.
+- Mesh gradients: Coons patches per grid cell (`draw_patch`), explicit handles or Catmull-Rom ones.
+- WebP: the prebuilt Skia has no WebP codec; `images::decode` and `offscreen::encode` use image-webp
+  (lossless encode).
 - Performance: per-node bounds culling; level-of-detail below thresholds in `draw.rs`
   (`LOD_FLATTEN_PX` subtrees → one flat rect of their dominant color, `LOD_GREEK_PX` text → bars,
   1px slivers flattened). Root frames smaller than `THUMB_MAX_PX` on screen are drawn from cached
@@ -93,18 +110,21 @@ style (variables and themes applied, instances expanded) plus computed rects and
   register (≤20 s); else (or with `STUDY_HEADLESS`) open the document in-process.
 - `ipc.rs`: each window listens on 127.0.0.1 with a random port + token and writes
   `~/.study/instances/<pid>.json` (open file, focus time). Stale entries are pruned by pid.
-- `gui.rs`: winit + glutin GL surface wrapped as a Skia surface; muda native menu bar (no muda
-  accelerators — keys are handled in winit and the shortcut text is in the labels). Theme =
+- `gui.rs`: winit + glutin GL surface wrapped as a Skia surface; muda native menu bar with
+  accelerators: on macOS they are real key equivalents (winit never sees those keys); on Windows
+  they only label the items, because nothing calls `TranslateAccelerator`, so winit handles the keys. Theme =
   light/dark/system (title bar, menu bar and canvas). State (recent files, per-file cameras, theme)
   in `~/.study/state.json`. The disk is polled ~1 s for external changes.
-  Agent feedback: after `execute`, new path nodes are queued for the pen draw-in (`draw_in`) and
-  nodes read with `Get` get a scan sweep (`scan`, `draw_scan`).
+  Agent feedback: after `execute`, new path nodes are queued for the pen draw-in (`draw_in`), nodes
+  read with `Get` get a scan sweep (`scan`, `draw_scan`), and root frames the call changed glow with
+  a "Claude is working" badge (`working`, `draw_working`) for `WORK_HOLD` seconds after the last
+  change. MCP has no "agent finished" signal, so idle time is the only cue.
 - `shot.rs` / `export.rs` / `html.rs`: screenshots (≤1568 px edge), PNG/JPEG/PDF export, and
   HTML+CSS / Tailwind generation.
 - Release builds use the Windows subsystem (no console); `mcp` and `ipc` attach to the parent console.
 
 ## Known gaps
 
-`imports` of other `.pen` files, `script` nodes, WebP, animated `@time` shaders, image generation /
-stock photos, the `browser` tool. Memory is ~2.5 GB for 920K nodes (per-node JSON maps) — the
+Image generation / stock photos, the `browser` tool, exact parity of seeded randomness in scripts.
+macOS is built and tested in CI but has not been exercised by an agent on a real Mac. Memory is ~2.5 GB for 920K nodes (per-node JSON maps) — the
 first thing to optimize if huge files become common.

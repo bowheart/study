@@ -18,6 +18,7 @@ each `execute` call with Ctrl+Z.
 | `execute` API | Always — functions available inside snippets | [execute.md](./execute.md) |
 | Components | Reusable components, instances, overrides | [components.md](./components.md) |
 | Layout | Sizing rules, text sizing, common layout mistakes | [layout.md](./layout.md) |
+| Scripts, shaders, imports | Script nodes, shader fills (time, mouse, textures, SDF, backdrop), imported files | [scripts-and-shaders.md](./scripts-and-shaders.md) |
 
 ## Working rules
 

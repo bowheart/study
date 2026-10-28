@@ -43,7 +43,7 @@ impl Images {
             });
             return None;
         }
-        let img = std::fs::read(key).ok().and_then(|b| Image::from_encoded(Data::new_copy(&b)));
+        let img = std::fs::read(key).ok().and_then(|b| decode(&b));
         let out = img.clone();
         self.cache.insert(key.to_string(), img.map(State::Ready).unwrap_or(State::Failed));
         out
@@ -52,7 +52,7 @@ impl Images {
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
         while let Ok((url, data)) = self.rx.try_recv() {
-            let img = data.and_then(|b| Image::from_encoded(Data::new_copy(&b)));
+            let img = data.and_then(|b| decode(&b));
             self.cache.insert(url, img.map(State::Ready).unwrap_or(State::Failed));
             changed = true;
         }
@@ -69,7 +69,7 @@ impl Images {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             match self.rx.recv_timeout(left) {
                 Ok((url, data)) => {
-                    let img = data.and_then(|b| Image::from_encoded(Data::new_copy(&b)));
+                    let img = data.and_then(|b| decode(&b));
                     self.cache.insert(url, img.map(State::Ready).unwrap_or(State::Failed));
                 }
                 Err(_) => break,
@@ -82,4 +82,21 @@ impl Default for Images {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Decodes PNG/JPEG/GIF/BMP/ICO with Skia, and WebP (which the prebuilt Skia lacks) in Rust.
+pub fn decode(bytes: &[u8]) -> Option<Image> {
+    if let Some(img) = Image::from_encoded(Data::new_copy(bytes)) {
+        return Some(img);
+    }
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return None;
+    }
+    let mut dec = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes)).ok()?;
+    let (w, h) = dec.dimensions();
+    let mut buf = vec![0u8; dec.output_buffer_size()?];
+    dec.read_image(&mut buf).ok()?;
+    let rgba = if dec.has_alpha() { buf } else { buf.chunks(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect() };
+    let info = skia_safe::ImageInfo::new((w as i32, h as i32), skia_safe::ColorType::RGBA8888, skia_safe::AlphaType::Unpremul, None);
+    skia_safe::images::raster_from_data(&info, Data::new_copy(&rgba), w as usize * 4)
 }

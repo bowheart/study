@@ -46,6 +46,13 @@ impl Vars {
         Vars { defs: doc.variables().cloned().unwrap_or_default(), default_theme }
     }
 
+    /// Adds variables from `imports` (already keyed `alias:name`).
+    pub fn add_imported(&mut self, defs: &Props) {
+        for (k, v) in defs {
+            self.defs.insert(k.clone(), v.clone());
+        }
+    }
+
     pub fn defs(&self) -> &Props {
         &self.defs
     }
@@ -64,7 +71,8 @@ impl Vars {
     }
 
     fn lookup<'a>(&'a self, name: &str, theme: &Theme) -> Option<&'a Value> {
-        let def = self.defs.get(name)?;
+        // Imported variables are `alias:name`; a bare name may also live in one import.
+        let def = self.defs.get(name).or_else(|| self.defs.iter().find(|(k, _)| k.split_once(':').is_some_and(|(_, n)| n == name)).map(|(_, v)| v))?;
         let value = def.get("value")?;
         match value {
             Value::Array(entries) => pick_themed(entries, theme),

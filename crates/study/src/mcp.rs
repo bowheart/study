@@ -240,6 +240,12 @@ fn launch_window(file: &Path, key: &str) -> Option<Instance> {
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         cmd.creation_flags(DETACHED_PROCESS);
     }
+    #[cfg(unix)]
+    {
+        // Its own process group, so the window outlives the terminal or session that started it.
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     cmd.spawn().ok()?;
     let deadline = Instant::now() + Duration::from_secs(20);

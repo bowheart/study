@@ -131,7 +131,7 @@ pub fn execute(engine: &mut Engine, input: Option<String>, edit_id: Option<Strin
 
     DEADLINE.with(|d| d.set(None));
     HOST.with(|h| h.set(std::ptr::null_mut()));
-    let st = STATE.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    let mut st = STATE.with(|s| std::mem::take(&mut *s.borrow_mut()));
 
     match outcome {
         Err(msg) => {
@@ -151,12 +151,26 @@ pub fn execute(engine: &mut Engine, input: Option<String>, edit_id: Option<Strin
                 engine.failed.remove(id);
             }
             let log = engine.doc.commit();
+            // Top-level frames this call changed, for the window's "agent is working" glow.
+            let mut touched: Vec<String> = Vec::new();
+            for u in &log {
+                let (pen::doc::Undo::Props { node, .. } | pen::doc::Undo::Inserted { node } | pen::doc::Undo::Removed { node, .. } | pen::doc::Undo::Moved { node, .. }) = u else { continue };
+                let root = match u {
+                    pen::doc::Undo::Removed { parent: Some(p), .. } => engine.doc.root_of(*p),
+                    _ => engine.doc.root_of(*node),
+                };
+                touched.push(engine.doc.node(root).id().to_string());
+            }
+            touched.sort();
+            touched.dedup();
+            engine.touched_roots = touched;
             let changed = !log.is_empty();
             if changed {
                 engine.undo.push(log);
                 engine.redo.clear();
             }
             engine.refresh();
+            st.warnings.extend(engine.script_errors.drain(..));
             let mut out = String::new();
             if changed {
                 if let Err(e) = engine.save() {
@@ -477,7 +491,7 @@ impl Host<'_> {
             return Err(format!("Insert: nodeData must be an object, got {data}"));
         }
         if let Some(r) = data.get("ref").and_then(Value::as_str) {
-            if self.e.doc.find(r).is_none() {
+            if self.e.doc.find(r).is_none() && self.e.imports.node(r).is_none() {
                 return Err(format!("Insert: ref '{r}' does not exist"));
             }
         }

@@ -11,3 +11,4 @@ serde_json.workspace = true
 ureq = "3.5.0"
 flate2 = "1.1.10"
 tar = "0.4.46"
+image-webp = "0.2"

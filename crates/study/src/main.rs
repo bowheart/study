@@ -14,6 +14,7 @@ mod html;
 mod ipc;
 mod mcp;
 mod shot;
+mod scripts;
 mod svg;
 mod tools;
 

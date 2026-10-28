@@ -12,7 +12,9 @@ use glutin::surface::{GlSurface, Surface as GlWinSurface, SurfaceAttributesBuild
 use glutin_winit::DisplayBuilder;
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use pen::scene::Rect;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use raw_window_handle::HasWindowHandle;
+#[cfg(windows)]
+use raw_window_handle::RawWindowHandle;
 use render::View;
 use serde_json::{json, Value};
 use skia_safe::gpu::gl::FramebufferInfo;
@@ -27,6 +29,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+#[cfg(windows)]
 use winit::platform::windows::WindowAttributesExtWindows;
 use winit::window::{Icon, Theme, Window, WindowAttributes, WindowId};
 
@@ -91,7 +94,11 @@ struct Scan {
     start: Instant,
 }
 
-const SCAN_SECS: f32 = 0.9;
+/// Sweep, then linger and fade (see `draw_scan`).
+const SCAN_SECS: f32 = 2.2;
+/// How long a frame keeps glowing after the agent last touched it, and its fade-out.
+const WORK_HOLD: f32 = 20.0;
+const WORK_FADE: f32 = 2.5;
 
 struct App {
     engine: Option<Engine>,
@@ -109,11 +116,15 @@ struct App {
     recent: Vec<PathBuf>,
     anims: Vec<Anim>,
     scans: Vec<Scan>,
+    /// Top-level frames the agent is working in: first and latest activity.
+    working: HashMap<String, (Instant, Instant)>,
     port: u16,
     token: String,
     last_poll: Instant,
     ui_font: Font,
     initial: Option<PathBuf>,
+    /// App start, the clock for pulsing animations.
+    started: Instant,
 }
 
 const MAX_RECENT: usize = 12;
@@ -159,11 +170,13 @@ pub fn run(file: Option<PathBuf>) -> Result<()> {
         recent,
         anims: Vec::new(),
         scans: Vec::new(),
+        working: HashMap::new(),
         port,
         token,
         last_poll: Instant::now(),
         ui_font: Font::new(typeface, 11.0),
         initial: file,
+        started: Instant::now(),
     };
     ipc::register(port, &app.token, None, true);
     event_loop.run_app(&mut app)?;
@@ -198,6 +211,7 @@ impl App {
         }
     }
 
+    #[cfg(windows)]
     fn hwnd(&self) -> Option<isize> {
         let g = self.gl.as_ref()?;
         match g.window.window_handle().ok()?.as_raw() {
@@ -323,13 +337,16 @@ impl App {
                 ThemePref::System => g.window.theme() == Some(Theme::Dark),
             };
         }
-        if let (Some(m), Some(hwnd)) = (&self.menus, self.hwnd()) {
+        if let Some(m) = &self.menus {
             for (p, item) in &m.themes {
                 item.set_checked(*p == self.theme);
             }
-            let t = if self.dark { muda::MenuTheme::Dark } else { muda::MenuTheme::Light };
-            // Safety: hwnd is this window's live handle, on the UI thread.
-            let _ = unsafe { m.bar.set_theme_for_hwnd(hwnd, t) };
+            #[cfg(windows)]
+            if let Some(hwnd) = self.hwnd() {
+                let t = if self.dark { muda::MenuTheme::Dark } else { muda::MenuTheme::Light };
+                // Safety: hwnd is this window's live handle, on the UI thread.
+                let _ = unsafe { m.bar.set_theme_for_hwnd(hwnd, t) };
+            }
         }
         self.redraw();
     }
@@ -344,24 +361,34 @@ impl App {
     // ------------------------------------------------------------------ menus
 
     fn build_menus(&mut self) {
-        let Some(hwnd) = self.hwnd() else { return };
-        let item = |id: &str, text: &str| MenuItem::with_id(id, text, true, None);
+        use muda::accelerator::{Accelerator, Code, Modifiers, CMD_OR_CTRL};
+        let item = |id: &str, text: &str, mods: Option<Modifiers>, key: Option<Code>| {
+            let accel = key.map(|k| Accelerator::new(mods.unwrap_or(Modifiers::empty()), k));
+            MenuItem::with_id(id, text, true, accel)
+        };
+        let cmd = Some(CMD_OR_CTRL);
+        let cmd_shift = Some(CMD_OR_CTRL | Modifiers::SHIFT);
         let sep = PredefinedMenuItem::separator;
         let recent = Submenu::new("Open &Recent", true);
         let file = Submenu::new("&File", true);
         let _ = file.append_items(&[
-            &item("new", "&New…\tCtrl+N"),
-            &item("open", "&Open…\tCtrl+O"),
+            &item("new", "&New…", cmd, Some(Code::KeyN)),
+            &item("open", "&Open…", cmd, Some(Code::KeyO)),
             &recent,
             &sep(),
-            &item("save", "&Save\tCtrl+S"),
-            &item("save_as", "Save &As…\tCtrl+Shift+S"),
-            &item("reload", "Re&load from Disk\tF5"),
-            &sep(),
-            &item("exit", "E&xit"),
+            &item("save", "&Save", cmd, Some(Code::KeyS)),
+            &item("save_as", "Save &As…", cmd_shift, Some(Code::KeyS)),
+            &item("reload", "Re&load from Disk", None, Some(Code::F5)),
         ]);
+        #[cfg(not(target_os = "macos"))]
+        let _ = file.append_items(&[&sep(), &item("exit", "E&xit", None, None)]);
         let edit = Submenu::new("&Edit", true);
-        let _ = edit.append_items(&[&item("undo", "&Undo\tCtrl+Z"), &item("redo", "&Redo\tCtrl+Shift+Z"), &sep(), &item("deselect", "Select &None\tEsc")]);
+        let _ = edit.append_items(&[
+            &item("undo", "&Undo", cmd, Some(Code::KeyZ)),
+            &item("redo", "&Redo", cmd_shift, Some(Code::KeyZ)),
+            &sep(),
+            &item("deselect", "Select &None", None, Some(Code::Escape)),
+        ]);
         let themes = [
             (ThemePref::Light, CheckMenuItem::with_id("theme_light", "&Light", true, false, None)),
             (ThemePref::Dark, CheckMenuItem::with_id("theme_dark", "&Dark", true, false, None)),
@@ -371,19 +398,40 @@ impl App {
         let _ = theme.append_items(&[&themes[0].1, &themes[1].1, &themes[2].1]);
         let view = Submenu::new("&View", true);
         let _ = view.append_items(&[
-            &item("fit", "Zoom to &Fit\tCtrl+0"),
-            &item("actual", "&Actual Size\tCtrl+1"),
-            &item("zoom_sel", "Zoom to &Selection\tCtrl+2"),
-            &item("zoom_in", "Zoom &In\tCtrl+="),
-            &item("zoom_out", "Zoom &Out\tCtrl+-"),
+            &item("fit", "Zoom to &Fit", cmd, Some(Code::Digit0)),
+            &item("actual", "&Actual Size", cmd, Some(Code::Digit1)),
+            &item("zoom_sel", "Zoom to &Selection", cmd, Some(Code::Digit2)),
+            &item("zoom_in", "Zoom &In", cmd, Some(Code::Equal)),
+            &item("zoom_out", "Zoom &Out", cmd, Some(Code::Minus)),
             &sep(),
             &theme,
         ]);
         let bar = Menu::new();
+        #[cfg(target_os = "macos")]
+        {
+            // The first submenu is the application menu on macOS.
+            let app = Submenu::new("study", true);
+            let _ = app.append_items(&[
+                &PredefinedMenuItem::about(None, None),
+                &sep(),
+                &PredefinedMenuItem::hide(None),
+                &PredefinedMenuItem::hide_others(None),
+                &PredefinedMenuItem::show_all(None),
+                &sep(),
+                &item("exit", "Quit study", cmd, Some(Code::KeyQ)),
+            ]);
+            let _ = bar.append(&app);
+        }
         let _ = bar.append_items(&[&file, &edit, &view]);
-        let t = if self.dark { muda::MenuTheme::Dark } else { muda::MenuTheme::Light };
-        // Safety: hwnd is this window's live handle, on the UI thread.
-        let _ = unsafe { bar.init_for_hwnd_with_theme(hwnd, t) };
+        #[cfg(windows)]
+        {
+            let Some(hwnd) = self.hwnd() else { return };
+            let t = if self.dark { muda::MenuTheme::Dark } else { muda::MenuTheme::Light };
+            // Safety: hwnd is this window's live handle, on the UI thread.
+            let _ = unsafe { bar.init_for_hwnd_with_theme(hwnd, t) };
+        }
+        #[cfg(target_os = "macos")]
+        bar.init_for_nsapp();
         self.menus = Some(Menus { bar, recent, themes });
         self.rebuild_recent_menu();
     }
@@ -548,6 +596,15 @@ impl App {
                     e.prune_selection();
                     let fresh = std::mem::take(&mut e.fresh_paths);
                     let reads = std::mem::take(&mut e.fresh_reads);
+                    let touched = std::mem::take(&mut e.touched_roots);
+                    let now = Instant::now();
+                    for k in touched {
+                        let w = self.working.entry(k).or_insert((now, now));
+                        if now.duration_since(w.1).as_secs_f32() > WORK_HOLD + WORK_FADE {
+                            w.0 = now;
+                        }
+                        w.1 = now;
+                    }
                     self.draw_in(fresh);
                     self.scan(reads);
                     r
@@ -640,7 +697,7 @@ impl App {
         keys.retain(|k| seen.insert(k.clone()) && e.abs_rect(k).is_some_and(|r| r.intersects(&view)));
         let now = Instant::now();
         for (i, key) in keys.into_iter().take(24).enumerate() {
-            self.scans.push(Scan { key, start: now + Duration::from_millis(70 * i as u64) });
+            self.scans.push(Scan { key, start: now + Duration::from_millis(140 * i as u64) });
         }
         self.redraw();
     }
@@ -717,6 +774,22 @@ impl App {
                 scans.push((skia_safe::Rect::new(l, t, r, b), (now - s.start).as_secs_f32() / SCAN_SECS));
             }
         }
+        // Frames the agent is working in: screen rect, corner radius, glow strength.
+        self.working.retain(|_, (_, last)| now.duration_since(*last).as_secs_f32() < WORK_HOLD + WORK_FADE);
+        let mut glows = Vec::new();
+        if let Some(e) = &self.engine {
+            for (key, (first, last)) in &self.working {
+                let Some((s, i)) = e.locate(key) else { continue };
+                let n = &s.nodes[i as usize];
+                let r = s.abs_rect(i);
+                let rect = skia_safe::Rect::from_xywh((r.x - cam.x) * cam.zoom, (r.y - cam.y) * cam.zoom, r.w * cam.zoom, r.h * cam.zoom);
+                let fade_in = (now.duration_since(*first).as_secs_f32() / 0.4).min(1.0);
+                let idle = now.duration_since(*last).as_secs_f32();
+                let fade_out = 1.0 - ((idle - WORK_HOLD) / WORK_FADE).clamp(0.0, 1.0);
+                glows.push((rect, n.radius[0] * cam.zoom, fade_in * fade_out));
+            }
+        }
+        let clock = now.duration_since(self.started).as_secs_f32();
 
         let Some(g) = self.gl.as_mut() else { return };
         let canvas = g.surface.canvas();
@@ -796,6 +869,9 @@ impl App {
             for k in &e.selection {
                 outline(k, Color4f::new(0.10, 0.55, 1.0, 1.0), 1.5, true);
             }
+            for (r, radius, strength) in &glows {
+                draw_working(canvas, *r, *radius, *strength, clock, &self.ui_font);
+            }
             for (r, t) in &scans {
                 draw_scan(canvas, *r, *t);
             }
@@ -860,34 +936,84 @@ fn draw_nib(canvas: &skia_safe::Canvas, x: f32, y: f32) {
     canvas.draw_path(&path, &edge);
 }
 
-/// The "agent is reading this" effect: a soft scan line sweeping down a node's box, `t` in 0..1.
+const ACCENT: (f32, f32, f32) = (0.23, 0.51, 0.96);
+
+fn accent(a: f32) -> Color4f {
+    Color4f::new(ACCENT.0, ACCENT.1, ACCENT.2, a)
+}
+
+/// The "agent is reading this" effect, `t` in 0..1: a scan line sweeps down the node's box
+/// (first 55%), then the highlighted box lingers and fades.
 fn draw_scan(canvas: &skia_safe::Canvas, r: skia_safe::Rect, t: f32) {
-    let accent = |a: f32| Color4f::new(0.23, 0.51, 0.96, a);
-    let ease = 1.0 - (1.0 - t).powi(3);
-    let fade = 1.0 - t.powi(2);
+    let sweep = (t / 0.55).min(1.0);
+    let ease = 1.0 - (1.0 - sweep).powi(3);
+    let fade = if t < 0.55 { 1.0 } else { 1.0 - ((t - 0.55) / 0.45).powi(2) };
     let y = r.top + ease * r.height();
     canvas.save();
     canvas.clip_rect(r, None, true);
-    let mut tint = Paint::new(accent(0.06 * fade), None);
+    let mut tint = Paint::new(accent(0.10 * fade), None);
     tint.set_anti_alias(true);
-    canvas.draw_rect(r, &tint);
-    let trail = (r.height() * 0.35).clamp(12.0, 90.0);
-    let colors = [accent(0.0).to_color(), accent(0.28 * fade).to_color()];
-    #[allow(deprecated)]
-    let shader = skia_safe::gradient_shader::linear(((r.left, y - trail), (r.left, y)), colors.as_slice(), None, skia_safe::TileMode::Clamp, None, None);
-    let mut band = Paint::default();
-    band.set_shader(shader);
-    canvas.draw_rect(skia_safe::Rect::new(r.left, y - trail, r.right, y), &band);
-    let mut line = Paint::new(accent(0.9 * fade), None);
-    line.set_anti_alias(true);
-    line.set_stroke_width(1.5);
-    canvas.draw_line((r.left, y), (r.right, y), &line);
+    canvas.draw_rect(skia_safe::Rect::new(r.left, r.top, r.right, y), &tint);
+    if sweep < 1.0 {
+        let trail = (r.height() * 0.4).clamp(16.0, 140.0);
+        let colors = [accent(0.0).to_color(), accent(0.45).to_color()];
+        #[allow(deprecated)]
+        let shader = skia_safe::gradient_shader::linear(((r.left, y - trail), (r.left, y)), colors.as_slice(), None, skia_safe::TileMode::Clamp, None, None);
+        let mut band = Paint::default();
+        band.set_shader(shader);
+        canvas.draw_rect(skia_safe::Rect::new(r.left, y - trail, r.right, y), &band);
+        let mut glow = Paint::new(accent(0.8), None);
+        glow.set_anti_alias(true);
+        glow.set_mask_filter(skia_safe::MaskFilter::blur(skia_safe::BlurStyle::Normal, 3.0, None));
+        canvas.draw_rect(skia_safe::Rect::new(r.left, y - 2.0, r.right, y + 2.0), &glow);
+        let mut line = Paint::new(accent(1.0), None);
+        line.set_anti_alias(true);
+        line.set_stroke_width(2.0);
+        canvas.draw_line((r.left, y), (r.right, y), &line);
+    }
     canvas.restore();
-    let mut edge = Paint::new(accent(0.55 * fade), None);
+    let mut edge = Paint::new(accent(0.9 * fade), None);
     edge.set_anti_alias(true);
     edge.set_style(PaintStyle::Stroke);
-    edge.set_stroke_width(1.0);
+    edge.set_stroke_width(1.5);
     canvas.draw_rect(r, &edge);
+}
+
+/// "The agent is working here": a softly pulsing glow around a top-level frame, plus a small
+/// badge above its top-right corner.
+fn draw_working(canvas: &skia_safe::Canvas, r: skia_safe::Rect, radius: f32, strength: f32, clock: f32, font: &Font) {
+    if strength <= 0.0 {
+        return;
+    }
+    let pulse = 0.7 + 0.3 * (clock * std::f32::consts::TAU / 1.8).sin();
+    let rr = skia_safe::RRect::new_rect_xy(r, radius, radius);
+    for (width, sigma, alpha) in [(10.0, 14.0, 0.45), (4.0, 5.0, 0.6)] {
+        let mut p = Paint::new(accent(alpha * pulse * strength), None);
+        p.set_anti_alias(true);
+        p.set_style(PaintStyle::Stroke);
+        p.set_stroke_width(width);
+        p.set_mask_filter(skia_safe::MaskFilter::blur(skia_safe::BlurStyle::Outer, sigma, None));
+        canvas.draw_rrect(rr, &p);
+    }
+    let mut edge = Paint::new(accent(0.85 * strength), None);
+    edge.set_anti_alias(true);
+    edge.set_style(PaintStyle::Stroke);
+    edge.set_stroke_width(1.5);
+    canvas.draw_rrect(rr, &edge);
+
+    let label = "Claude is working";
+    let (tw, _) = font.measure_str(label, None);
+    let badge = skia_safe::Rect::from_xywh(r.right - tw - 30.0, r.top - 26.0, tw + 30.0, 20.0);
+    if badge.left < r.left {
+        return;
+    }
+    let mut bg = Paint::new(accent(strength), None);
+    bg.set_anti_alias(true);
+    canvas.draw_round_rect(badge, 10.0, 10.0, &bg);
+    let mut dot = Paint::new(Color4f::new(1.0, 1.0, 1.0, strength * (0.45 + 0.55 * pulse)), None);
+    dot.set_anti_alias(true);
+    canvas.draw_circle((badge.left + 11.0, badge.center_y()), 3.5, &dot);
+    canvas.draw_str(label, (badge.left + 20.0, badge.center_y() + 4.0), font, &Paint::new(Color4f::new(1.0, 1.0, 1.0, strength), None));
 }
 
 /// A two-segment light/dark switch: sun on the left, moon on the right.
@@ -1009,7 +1135,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.draw();
                 self.present();
-                if !self.anims.is_empty() || !self.scans.is_empty() || self.engine.as_ref().is_some_and(|e| e.renderer.needs_redraw) {
+                if !self.anims.is_empty() || !self.scans.is_empty() || !self.working.is_empty() || self.engine.as_ref().is_some_and(|e| e.renderer.needs_redraw) {
                     self.redraw();
                 }
             }
@@ -1053,6 +1179,11 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 _ => {}
             },
+            // Trackpad pinch (macOS).
+            WindowEvent::PinchGesture { delta, .. } => {
+                let (x, y) = self.cursor;
+                self.zoom_at(1.0 + delta as f32, x, y);
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 let sf = self.scale_factor();
                 let (dx, dy) = match delta {
@@ -1135,8 +1266,9 @@ fn create_gl(el: &ActiveEventLoop) -> Result<Gl> {
     let attrs = WindowAttributes::default()
         .with_title("study")
         .with_inner_size(winit::dpi::LogicalSize::new(1440.0, 900.0))
-        .with_window_icon(icon.clone())
-        .with_taskbar_icon(icon);
+        .with_window_icon(icon.clone());
+    #[cfg(windows)]
+    let attrs = attrs.with_taskbar_icon(icon);
     let template = ConfigTemplateBuilder::new().with_alpha_size(8).with_transparency(false);
     let (window, config) = DisplayBuilder::new()
         .with_window_attributes(Some(attrs))
@@ -1144,6 +1276,13 @@ fn create_gl(el: &ActiveEventLoop) -> Result<Gl> {
         .map_err(|e| anyhow!("{e}"))?;
     let window = window.ok_or_else(|| anyhow!("no window"))?;
     let raw = window.window_handle()?.as_raw();
+    // macOS only offers modern OpenGL as a 3.2+ core profile, and only when asked for it.
+    #[cfg(target_os = "macos")]
+    let ctx_attrs = ContextAttributesBuilder::new()
+        .with_context_api(ContextApi::OpenGl(Some(glutin::context::Version::new(4, 1))))
+        .with_profile(glutin::context::GlProfile::Core)
+        .build(Some(raw));
+    #[cfg(not(target_os = "macos"))]
     let ctx_attrs = ContextAttributesBuilder::new().build(Some(raw));
     let gles_attrs = ContextAttributesBuilder::new().with_context_api(ContextApi::Gles(None)).build(Some(raw));
     let not_current = unsafe {

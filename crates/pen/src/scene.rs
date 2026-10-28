@@ -2,6 +2,7 @@
 //! themes are resolved, component instances (`ref`) are expanded, and legacy
 //! property forms are normalized. Layout then fills in each node's `rect`.
 
+use crate::imports::Imports;
 use crate::style::*;
 use crate::vars::{apply_theme, Theme, Vars};
 use crate::{Document, NodeId, Props};
@@ -64,7 +65,8 @@ pub enum Kind {
     Text(Box<TextData>),
     Icon { library: String, name: String, weight: Option<f32> },
     Note(NoteKind, Box<TextData>),
-    Script,
+    /// Generates its children from a JS file (`scriptUri`) after layout; see `graft`.
+    Script { uri: Arc<str>, inputs: Arc<serde_json::Map<String, Value>>, clip: bool },
     /// A `ref` whose component could not be found (or is cyclic).
     Missing,
 }
@@ -111,10 +113,10 @@ impl SNode {
         self.path.as_deref().unwrap_or(&self.id)
     }
     pub fn is_container(&self) -> bool {
-        matches!(self.kind, Kind::Frame { .. } | Kind::Group)
+        matches!(self.kind, Kind::Frame { .. } | Kind::Group | Kind::Script { .. })
     }
     pub fn clips(&self) -> bool {
-        matches!(self.kind, Kind::Frame { clip: true, .. })
+        matches!(self.kind, Kind::Frame { clip: true, .. } | Kind::Script { clip: true, .. })
     }
 }
 
@@ -185,15 +187,34 @@ struct Inst<'a> {
 pub struct Compiler<'a> {
     doc: &'a Document,
     vars: &'a Vars,
+    imports: Option<&'a Imports>,
     out: RootScene,
     ref_stack: Vec<NodeId>,
+    /// Depth of instances of imported components (they have no NodeId for cycle checks).
+    import_depth: u32,
 }
 
 pub fn compile_root(doc: &Document, vars: &Vars, root: NodeId) -> RootScene {
-    let mut c = Compiler { doc, vars, out: RootScene { doc_root: Some(root), ..Default::default() }, ref_stack: Vec::new() };
+    compile_root_with(doc, vars, root, None)
+}
+
+/// Compiles a top-level node; `imports` resolves refs to components in other files.
+pub fn compile_root_with(doc: &Document, vars: &Vars, root: NodeId, imports: Option<&Imports>) -> RootScene {
+    let mut c = Compiler { doc, vars, imports, out: RootScene { doc_root: Some(root), ..Default::default() }, ref_stack: Vec::new(), import_depth: 0 };
     let theme = vars.default_theme.clone();
     c.node(Src::Doc(root), NONE, &theme, None);
     c.out
+}
+
+/// Compiles nodes generated at runtime (a script's output) as the children of `parent`,
+/// replacing any it had. They have no ids in the document.
+pub fn graft(scene: &mut RootScene, doc: &Document, vars: &Vars, imports: Option<&Imports>, parent: u32, nodes: &[Value]) {
+    let out = std::mem::take(scene);
+    let mut c = Compiler { doc, vars, imports, out, ref_stack: Vec::new(), import_depth: 0 };
+    let theme = vars.default_theme.clone();
+    let list: Vec<u32> = nodes.iter().filter_map(|v| c.node(Src::Json(v), parent, &theme, None)).collect();
+    c.out.nodes[parent as usize].children = list;
+    *scene = c.out;
 }
 
 impl<'a> Compiler<'a> {
@@ -251,14 +272,26 @@ impl<'a> Compiler<'a> {
         // Component instance: merge the component with the ref's own properties.
         if props.get("type").and_then(Value::as_str) == Some("ref") {
             let target = props.get("ref").and_then(Value::as_str).unwrap_or("");
-            let comp = doc.find(target).filter(|c| !self.ref_stack.contains(c));
-            let Some(comp) = comp else {
+            let local = doc.find(target).filter(|c| !self.ref_stack.contains(c));
+            let imported = match local {
+                None if self.import_depth < 32 => self.imports.and_then(|i| i.node(target)),
+                _ => None,
+            };
+            if local.is_none() && imported.is_none() {
                 let idx = self.push(&props, Kind::Missing, src_id, path, parent, theme);
                 return Some(idx);
+            }
+            // The component's own properties and children, from this file or an import.
+            let (comp_props, comp_children): (Cow<'a, Props>, Kids<'a>) = match (local, imported) {
+                (Some(c), _) => {
+                    self.out.uses.insert(c);
+                    (Cow::Borrowed(&doc.node(c).props), Kids::Doc(&doc.node(c).children))
+                }
+                (None, Some(v)) => (Cow::Owned(v.as_object().cloned().unwrap_or_default()), json_kids(v)),
+                (None, None) => unreachable!(),
             };
-            self.out.uses.insert(comp);
-            let comp_node = doc.node(comp);
-            let mut merged = comp_node.props.clone();
+            let mut merged = comp_props.into_owned();
+            merged.shift_remove("children");
             for (k, v) in props.iter() {
                 if matches!(k.as_str(), "type" | "ref" | "descendants" | "reusable" | "children") {
                     continue;
@@ -284,18 +317,24 @@ impl<'a> Compiler<'a> {
             // Override children of the instance root itself, if given.
             let comp_kids = match kids {
                 Kids::Json(list) if props.contains_key("children") => Kids::Json(list),
-                _ => Kids::Doc(&comp_node.children),
+                _ => comp_children,
             };
             let new_inst = Inst { prefix: format!("{my_path}/"), overrides };
             let kind = self.kind(&merged, theme);
-            let idx = self.push(&merged, kind, src_id.or(Some(comp)), path, parent, theme);
+            let idx = self.push(&merged, kind, src_id.or(local), path, parent, theme);
             self.out.nodes[idx as usize].reusable = false;
             if inst.is_none() {
                 self.out.nodes[idx as usize].src = src_id;
             }
-            self.ref_stack.push(comp);
+            match local {
+                Some(c) => self.ref_stack.push(c),
+                None => self.import_depth += 1,
+            }
             self.children(idx, comp_kids, theme, Some(&new_inst));
-            self.ref_stack.pop();
+            match local {
+                Some(_) => drop(self.ref_stack.pop()),
+                None => self.import_depth -= 1,
+            }
             return Some(idx);
         }
 
@@ -379,7 +418,16 @@ impl<'a> Compiler<'a> {
                 name: v.str(p.get("iconFontName"), theme).unwrap_or("").to_string(),
                 weight: num("weight"),
             },
-            "script" => Kind::Script,
+            "script" => Kind::Script {
+                uri: v.str(p.get("scriptUri"), theme).unwrap_or("").into(),
+                inputs: Arc::new(
+                    p.get("inputs")
+                        .and_then(Value::as_object)
+                        .map(|o| o.iter().map(|(k, x)| (k.clone(), v.resolve_deep(x, theme))).collect())
+                        .unwrap_or_default(),
+                ),
+                clip: v.bool(p.get("clip"), theme).unwrap_or(false),
+            },
             _ => Kind::Rect,
         }
     }
@@ -634,7 +682,7 @@ fn parse_fill(f: &Value, vars: &Vars, theme: &Theme) -> Option<Paint> {
                                     let u = match val {
                                         Value::Number(n) => Uniform::Float(n.as_f64()? as f32),
                                         Value::Bool(b) => Uniform::Bool(*b),
-                                        Value::String(s) => Uniform::Color(Rgba::parse(s)?),
+                                        Value::String(s) => Rgba::parse(s).map(Uniform::Color).unwrap_or_else(|| Uniform::Text(s.clone())),
                                         Value::Array(a) => Uniform::Vec(
                                             a.iter().map(|x| vars.num(Some(x), theme).unwrap_or(0.0)).collect(),
                                         ),
@@ -666,8 +714,20 @@ fn parse_fill(f: &Value, vars: &Vars, theme: &Theme) -> Option<Paint> {
                         .map(|a| {
                             a.iter()
                                 .filter_map(|p| {
-                                    let arr = p.as_array().or_else(|| p.get("position").and_then(Value::as_array))?;
-                                    Some([arr.first()?.as_f64()? as f32, arr.get(1)?.as_f64()? as f32])
+                                    let pair = |v: Option<&Value>| -> Option<[f32; 2]> {
+                                        let a = v?.as_array()?;
+                                        Some([a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32])
+                                    };
+                                    if p.is_array() {
+                                        return Some(MeshPoint { pos: pair(Some(p))?, ..Default::default() });
+                                    }
+                                    Some(MeshPoint {
+                                        pos: pair(p.get("position"))?,
+                                        left: pair(p.get("leftHandle")),
+                                        right: pair(p.get("rightHandle")),
+                                        top: pair(p.get("topHandle")),
+                                        bottom: pair(p.get("bottomHandle")),
+                                    })
                                 })
                                 .collect()
                         })

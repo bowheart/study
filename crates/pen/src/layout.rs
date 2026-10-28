@@ -108,7 +108,7 @@ impl Ctx<'_> {
                     h + 32.0
                 }
             }
-            Kind::Frame { .. } | Kind::Group => {
+            Kind::Frame { .. } | Kind::Group | Kind::Script { .. } => {
                 let dir = n.layout;
                 let pad = n.padding;
                 let gap = n.gap;

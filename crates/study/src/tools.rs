@@ -50,6 +50,10 @@ pub fn app_state(engine: &mut Engine, view: Option<ViewInfo>) -> String {
     let path = engine.path().map(|p| p.display().to_string()).unwrap_or_else(|| "(unsaved)".into());
     s.push_str(&format!("Active document: {path}\n"));
     s.push_str(&format!("Nodes: {}, top-level nodes: {}\n", engine.doc.node_count(), engine.doc.roots.len()));
+    for e in &engine.imports.errors {
+        s.push_str(&format!("Import problem: {e}
+"));
+    }
     if let Some(v) = view {
         s.push_str(&format!(
             "Viewport (document coords): x={:.0} y={:.0} width={:.0} height={:.0}, zoom {:.0}%\n",
@@ -125,7 +129,7 @@ fn describe(engine: &Engine, key: &str) -> (String, String) {
                 pen::scene::Kind::Text(_) => "text",
                 pen::scene::Kind::Icon { .. } => "icon",
                 pen::scene::Kind::Note(..) => "note",
-                pen::scene::Kind::Script => "script",
+                pen::scene::Kind::Script { .. } => "script",
                 pen::scene::Kind::Missing => "ref",
             };
             (ty.to_string(), n.name.as_deref().unwrap_or("").to_string())

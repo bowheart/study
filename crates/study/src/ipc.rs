@@ -39,9 +39,9 @@ pub fn now_ms() -> u64 {
 /// Normalizes a path for comparisons (case-insensitive on Windows).
 pub fn norm(p: &Path) -> String {
     let abs = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let s = abs.to_string_lossy().trim_start_matches(r"\\?\").replace('/', "\\");
+    let s = abs.to_string_lossy().trim_start_matches(r"\\?\").to_string();
     if cfg!(windows) {
-        s.to_lowercase()
+        s.replace('/', "\\").to_lowercase()
     } else {
         s
     }

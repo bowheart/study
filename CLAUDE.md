@@ -2,19 +2,24 @@
 
 Local Rust replacement for the Pen (pen.dev) desktop app: renders `.pen` design files on a Skia
 canvas and serves Pen's MCP tools (`get_app_state`, `execute`, `read_skill`, `get_style`) so Claude
-designs while the user watches. No manual editing UI by design. Windows only (MSVC toolchain).
+designs while the user watches. No manual editing UI by design. Runs on macOS (the user's main
+machine; Apple Silicon) and Windows. Platform code is `#[cfg]`-gated in `gui.rs` (menus, icons, GL
+profile) and `mcp.rs` (process detaching).
 User-facing docs: [README.md](README.md). Implementation notes: [docs/implementation.md](docs/implementation.md) —
 read the relevant section before changing file I/O, layout, rendering, the execute API or IPC.
 
 ## Layout
 
 - `crates/pen` — document model with lossless JSON round-trip, variables/themes, component
-  instances, Pen's flex layout, validation. No graphics deps; layout tests in `tests/layout.rs`.
+  instances, `imports` of other files, Pen's flex layout, validation. No graphics deps; layout
+  tests in `tests/layout.rs`.
 - `crates/render` — Skia renderer: fonts (Google Fonts download), text (SkParagraph), icons (npm
-  tarballs), images, GLSL→SkSL shaders, culling/LOD/thumbnails, offscreen rendering.
+  tarballs), images (incl. WebP via image-webp), GLSL→SkSL shaders, mesh gradients,
+  culling/LOD/thumbnails, offscreen rendering.
 - `crates/study` — the binary: window + menus (`gui.rs`), MCP stdio server (`mcp.rs`), IPC between
   MCP process and windows (`ipc.rs`), shared document state (`engine.rs`), QuickJS execute API
-  (`api.rs` + `prelude.js`), SVG import for `Generate` (`svg.rs`), screenshots/export/HTML.
+  (`api.rs` + `prelude.js`), `script` node runner (`scripts.rs`), SVG import for `Generate` (`svg.rs`),
+  screenshots/export/HTML.
 - `crates/study/docs/*.md` — the docs *Claude-as-designer* reads via `read_skill`/`get_app_state`
   (compiled in with `include_str!`; rebuild after editing). Keep them accurate to the API.
 - `assets/` — `logo.svg` and the icon rendered from it (`cargo run -p render --example mkicon -- assets/logo.svg assets`).
@@ -23,8 +28,8 @@ read the relevant section before changing file I/O, layout, rendering, the execu
 
 ```bash
 cargo build --release                       # target/release/study.exe
-cargo test --workspace                      # layout, undo, SVG import tests
-cargo run -p pen --example roundtrip -- <dir>   # every .pen must re-serialize byte-identical
+cargo test --workspace                      # layout, undo, SVG import, script tests
+cargo run -p pen --example roundtrip -- <files.pen...>   # each must re-serialize byte-identical
 cargo install --path crates/study           # what the user's MCP registration runs
 ```
 
@@ -43,3 +48,10 @@ recently focused window's frame as PNG (in `%TEMP%\study-ipc-1.png`) with its dr
   locked exe (`mv study.exe study.old.exe`), then build/install.
 - The PowerShell tool has hung on this machine; prefer Bash (call `powershell.exe ... < /dev/null` if needed).
   JSON written through Bash heredocs can lose `\\` escapes — use forward slashes in Windows paths.
+
+## CI and releases
+
+`.github/workflows/build.yml` builds and tests on macos-latest and windows-latest for every push.
+Pushing a `v*` tag (matching `version` in the workspace `Cargo.toml`) also packages `Study.app`
+(ad-hoc signed tarball) and `study.exe` (zip) into a GitHub release. Nothing is tested on a real
+Mac by the agent — macOS-specific behavior is only verified to compile; ask the user to check it.
