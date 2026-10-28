@@ -12,3 +12,8 @@ ureq = "3.5.0"
 flate2 = "1.1.10"
 tar = "0.4.46"
 image-webp = "0.2"
+
+# rust-skia only publishes prebuilt macOS binaries for GL + SVG + text layout together with Metal;
+# without it the build falls back to compiling Skia from source (slow, needs ninja).
+[target.'cfg(target_os = "macos")'.dependencies]
+skia-safe = { version = "0.156", features = ["gl", "textlayout", "svg", "metal"] }
