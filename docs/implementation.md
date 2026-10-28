@@ -120,7 +120,7 @@ style (variables and themes applied, instances expanded) plus computed rects and
   a "Claude is working" badge (`working`, `draw_working`) for `WORK_HOLD` seconds after the last
   change. MCP has no "agent finished" signal, so idle time is the only cue.
 - `updater.rs`: self-update for release builds. Checks GitHub `releases/latest` 10 s after launch and
-  every 6 h, stages the asset in `~/.study/updates/<version>/`, and the window shows a banner. Install
+  every 15 min, stages the asset in `~/.study/updates/<version>/`, and the window shows a banner. Install
   swaps in place: macOS renames `Study.app` aside and `ditto`s the new bundle in; Windows renames the
   running `study.exe` to `study.old-<pid>.exe` (allowed while running) and copies the new one in;
   then it relaunches with the same file. "Install on next launch" writes `pending.json`, applied at

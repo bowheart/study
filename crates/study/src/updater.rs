@@ -1,7 +1,7 @@
 //! Self-update from GitHub releases.
 //!
 //! Release builds (CI sets `STUDY_RELEASE=1` when building a `v*` tag) check the latest release
-//! at startup and every few hours, download the asset for this platform into
+//! at startup and every 15 minutes, download the asset for this platform into
 //! `~/.study/updates/<version>/`, and let the window offer "Install and Restart" or "Install on
 //! next launch". Installing swaps the app in place: on macOS the whole `Study.app` bundle, on
 //! Windows `study.exe` (a running exe can be renamed out of the way). Downloads made by the app
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const FEED: &str = "https://api.github.com/repos/bowheart/study/releases/latest";
-pub const INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+pub const INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone, Debug)]
 pub struct Update {

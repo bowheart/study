@@ -59,4 +59,6 @@ Tag builds set `STUDY_RELEASE=1`, which turns on the self-updater (`updater.rs`)
 `releases/latest` and downloads `study-macos-arm64.tar.gz` / `study-windows-x64.exe` — keep those
 asset names stable. Test the update flow with `STUDY_UPDATE_FEED=<local feed.json>` (GitHub
 release JSON whose asset URLs may be local paths) and `study ipc command '{"id":"update_install"}'`.
-Release steps for the user are in the README ("Releasing").
+To release: bump `version` under `[workspace.package]` in `Cargo.toml` (installed apps only update to
+a higher version), push to `master`, then `git tag -a vX.Y.Z -m "study X.Y.Z" && git push origin vX.Y.Z`.
+Installed release builds check every 15 minutes and show the update banner.

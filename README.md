@@ -49,7 +49,7 @@ folder to your PATH. The exe is unsigned, so Windows SmartScreen asks once befor
 
 ### Updating
 
-Release builds update themselves. A few seconds after launch, and every six hours while open,
+Release builds update themselves. A few seconds after launch, and every 15 minutes while open,
 study checks [GitHub Releases](https://github.com/bowheart/study/releases) and downloads a newer
 version in the background. When it's ready, a banner at the bottom of the window offers
 **Install and Restart** (reopens the same file) or **Install on next launch**. **Check for
@@ -153,21 +153,6 @@ Changes made by other programs are picked up automatically. Avoid having the sam
 Pen and study at once: Pen may overwrite study's changes when it saves.
 
 [examples/showcase.pen](examples/showcase.pen) is a sample dashboard Claude built in study.
-
-## Releasing
-
-1. Bump `version` under `[workspace.package]` in `Cargo.toml` (installed apps update only to a
-   higher version).
-2. Commit and push to `master`; CI builds and tests both platforms.
-3. Tag and push the tag:
-
-   ```bash
-   git tag -a v0.2.0 -m "study 0.2.0" && git push origin v0.2.0
-   ```
-
-The tag's workflow run builds release binaries (with the self-updater enabled), packages
-`Study.app` and `study.exe`, and publishes a GitHub release with generated notes. Installed copies
-pick it up within six hours, or immediately via Check for Updates.
 
 ## Files
 
