@@ -1,0 +1,13 @@
+[package]
+name = "render"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+pen = { path = "../pen" }
+skia-safe = { version = "0.156", features = ["gl", "textlayout", "svg"] }
+anyhow.workspace = true
+serde_json.workspace = true
+ureq = "3.5.0"
+flate2 = "1.1.10"
+tar = "0.4.46"

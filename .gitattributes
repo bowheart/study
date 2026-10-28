@@ -1,0 +1,4 @@
+# .pen files must round-trip byte-for-byte; never convert their line endings.
+*.pen -text
+*.png binary
+*.ico binary

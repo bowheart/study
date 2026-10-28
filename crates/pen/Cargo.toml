@@ -1,0 +1,11 @@
+[package]
+name = "pen"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+anyhow.workspace = true
+fastrand = "2.5.0"
