@@ -17,6 +17,7 @@ mod shot;
 mod scripts;
 mod svg;
 mod tools;
+mod uitext;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

@@ -18,7 +18,7 @@ use raw_window_handle::RawWindowHandle;
 use render::View;
 use serde_json::{json, Value};
 use skia_safe::gpu::gl::FramebufferInfo;
-use skia_safe::{Color, Color4f, Contains, Font, FontMgr, FontStyle, Matrix, Paint, PaintStyle, Path as SkPath};
+use skia_safe::{Color, Color4f, Contains, Matrix, Paint, PaintStyle, Path as SkPath};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::num::NonZeroU32;
@@ -121,7 +121,7 @@ struct App {
     port: u16,
     token: String,
     last_poll: Instant,
-    ui_font: Font,
+    ui: crate::uitext::UiText,
     initial: Option<PathBuf>,
     /// App start, the clock for pulsing animations.
     started: Instant,
@@ -153,7 +153,6 @@ pub fn run(file: Option<PathBuf>) -> Result<()> {
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).map(PathBuf::from).collect())
         .unwrap_or_default();
-    let typeface = FontMgr::new().legacy_make_typeface(None, FontStyle::normal()).ok_or_else(|| anyhow!("no system font"))?;
     let mut app = App {
         engine: None,
         gl: None,
@@ -174,7 +173,7 @@ pub fn run(file: Option<PathBuf>) -> Result<()> {
         port,
         token,
         last_poll: Instant::now(),
-        ui_font: Font::new(typeface, 11.0),
+        ui: crate::uitext::UiText::new(11.0).ok_or_else(|| anyhow!("no system font"))?,
         initial: file,
         started: Instant::now(),
     };
@@ -354,7 +353,7 @@ impl App {
     /// The light/dark switch in the bottom-right corner (logical px).
     fn theme_switch_rect(&self) -> skia_safe::Rect {
         let (ww, wh) = self.size();
-        let zoom_w = self.ui_font.measure_str("00000%", None).0;
+        let zoom_w = self.ui.measure("00000%");
         skia_safe::Rect::from_xywh(ww - zoom_w - 18.0 - 52.0, wh - 30.0, 52.0, 22.0)
     }
 
@@ -827,8 +826,8 @@ impl App {
                     continue;
                 }
                 let name = n.name.as_deref().unwrap_or(&n.id);
-                let text = ellipsize(&self.ui_font, name, sw);
-                canvas.draw_str(&text, (sx, sy - 6.0), &self.ui_font, &label);
+                let text = ellipsize(&self.ui, name, sw);
+                self.ui.draw(canvas, &text, (sx, sy - 6.0), &label);
             }
             let outline = |key: &str, color: Color4f, width: f32, with_label: bool| {
                 let Some((m, w, h)) = e.node_transform(key) else { return };
@@ -854,10 +853,10 @@ impl App {
                         let n = &s.nodes[i as usize];
                         let txt = format!("{}  {}×{}", n.name.as_deref().unwrap_or(&n.id), n.rect.w.round(), n.rect.h.round());
                         let (x, y) = ((pts[3].0 - cam.x) * cam.zoom, (pts[3].1 - cam.y) * cam.zoom);
-                        let (tw, _) = self.ui_font.measure_str(&txt, None);
+                        let tw = self.ui.measure(&txt);
                         let bg = Paint::new(color, None);
                         canvas.draw_round_rect(skia_safe::Rect::from_xywh(x, y + 4.0, tw + 10.0, 17.0), 3.0, 3.0, &bg);
-                        canvas.draw_str(&txt, (x + 5.0, y + 16.5), &self.ui_font, &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None));
+                        self.ui.draw(canvas, &txt, (x + 5.0, y + 16.5), &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None));
                     }
                 }
             };
@@ -870,7 +869,7 @@ impl App {
                 outline(k, Color4f::new(0.10, 0.55, 1.0, 1.0), 1.5, true);
             }
             for (r, radius, strength) in &glows {
-                draw_working(canvas, *r, *radius, *strength, clock, &self.ui_font);
+                draw_working(canvas, *r, *radius, *strength, clock, &self.ui);
             }
             for (r, t) in &scans {
                 draw_scan(canvas, *r, *t);
@@ -879,12 +878,12 @@ impl App {
                 draw_nib(canvas, p.x / sf, p.y / sf);
             }
             let zoom_txt = format!("{:.0}%", cam.zoom * 100.0);
-            let (tw, _) = self.ui_font.measure_str(&zoom_txt, None);
-            canvas.draw_str(&zoom_txt, (ww - tw - 10.0, wh - 10.0), &self.ui_font, &label);
+            let tw = self.ui.measure(&zoom_txt);
+            self.ui.draw(canvas, &zoom_txt, (ww - tw - 10.0, wh - 10.0), &label);
         } else {
             let msg = "Open a .pen file: File › Open, Ctrl+O, or drop it here";
-            let (tw, _) = self.ui_font.measure_str(msg, None);
-            canvas.draw_str(msg, ((ww - tw) / 2.0, wh / 2.0), &self.ui_font, &label);
+            let tw = self.ui.measure(msg);
+            self.ui.draw(canvas, msg, ((ww - tw) / 2.0, wh / 2.0), &label);
         }
         draw_theme_switch(canvas, switch, dark);
         canvas.restore();
@@ -897,12 +896,12 @@ impl App {
     }
 }
 
-fn ellipsize(font: &Font, s: &str, max: f32) -> String {
-    if font.measure_str(s, None).0 <= max {
+fn ellipsize(font: &crate::uitext::UiText, s: &str, max: f32) -> String {
+    if font.measure(s) <= max {
         return s.to_string();
     }
     let mut out: String = s.to_string();
-    while !out.is_empty() && font.measure_str(format!("{out}…"), None).0 > max {
+    while !out.is_empty() && font.measure(&format!("{out}…")) > max {
         out.pop();
     }
     format!("{out}…")
@@ -981,7 +980,7 @@ fn draw_scan(canvas: &skia_safe::Canvas, r: skia_safe::Rect, t: f32) {
 
 /// "The agent is working here": a softly pulsing glow around a top-level frame, plus a small
 /// badge above its top-right corner.
-fn draw_working(canvas: &skia_safe::Canvas, r: skia_safe::Rect, radius: f32, strength: f32, clock: f32, font: &Font) {
+fn draw_working(canvas: &skia_safe::Canvas, r: skia_safe::Rect, radius: f32, strength: f32, clock: f32, font: &crate::uitext::UiText) {
     if strength <= 0.0 {
         return;
     }
@@ -1002,7 +1001,7 @@ fn draw_working(canvas: &skia_safe::Canvas, r: skia_safe::Rect, radius: f32, str
     canvas.draw_rrect(rr, &edge);
 
     let label = "Claude is working";
-    let (tw, _) = font.measure_str(label, None);
+    let tw = font.measure(label);
     let badge = skia_safe::Rect::from_xywh(r.right - tw - 30.0, r.top - 26.0, tw + 30.0, 20.0);
     if badge.left < r.left {
         return;
@@ -1013,7 +1012,7 @@ fn draw_working(canvas: &skia_safe::Canvas, r: skia_safe::Rect, radius: f32, str
     let mut dot = Paint::new(Color4f::new(1.0, 1.0, 1.0, strength * (0.45 + 0.55 * pulse)), None);
     dot.set_anti_alias(true);
     canvas.draw_circle((badge.left + 11.0, badge.center_y()), 3.5, &dot);
-    canvas.draw_str(label, (badge.left + 20.0, badge.center_y() + 4.0), font, &Paint::new(Color4f::new(1.0, 1.0, 1.0, strength), None));
+    font.draw(canvas, label, (badge.left + 20.0, badge.center_y() + 4.0), &Paint::new(Color4f::new(1.0, 1.0, 1.0, strength), None));
 }
 
 /// A two-segment light/dark switch: sun on the left, moon on the right.
