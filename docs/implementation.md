@@ -119,6 +119,14 @@ style (variables and themes applied, instances expanded) plus computed rects and
   read with `Get` get a scan sweep (`scan`, `draw_scan`), and root frames the call changed glow with
   a "Claude is working" badge (`working`, `draw_working`) for `WORK_HOLD` seconds after the last
   change. MCP has no "agent finished" signal, so idle time is the only cue.
+- `updater.rs`: self-update for release builds. Checks GitHub `releases/latest` 10 s after launch and
+  every 6 h, stages the asset in `~/.study/updates/<version>/`, and the window shows a banner. Install
+  swaps in place: macOS renames `Study.app` aside and `ditto`s the new bundle in; Windows renames the
+  running `study.exe` to `study.old-<pid>.exe` (allowed while running) and copies the new one in;
+  then it relaunches with the same file. "Install on next launch" writes `pending.json`, applied at
+  the start of `gui::run`. `cleanup()` removes old exes and staged versions on startup.
+- Shutdown: `Gl`'s fields are ordered so Skia and GL objects drop before the window. The reverse
+  order hung the process on exit (the GL driver tearing down a context whose window was gone).
 - `shot.rs` / `export.rs` / `html.rs`: screenshots (≤1568 px edge), PNG/JPEG/PDF export, and
   HTML+CSS / Tailwind generation.
 - Release builds use the Windows subsystem (no console); `mcp` and `ipc` attach to the parent console.

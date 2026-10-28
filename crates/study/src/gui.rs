@@ -4,6 +4,7 @@
 use crate::engine::Engine;
 use crate::ipc;
 use crate::tools::{self, ViewInfo};
+use crate::updater;
 use anyhow::{anyhow, Result};
 use glutin::config::{ConfigTemplateBuilder, GlConfig};
 use glutin::context::{ContextApi, ContextAttributesBuilder, NotCurrentGlContext, PossiblyCurrentContext};
@@ -18,7 +19,7 @@ use raw_window_handle::RawWindowHandle;
 use render::View;
 use serde_json::{json, Value};
 use skia_safe::gpu::gl::FramebufferInfo;
-use skia_safe::{Color, Color4f, Contains, Matrix, Paint, PaintStyle, Path as SkPath};
+use skia_safe::{Color, Color4f, Contains, FontStyle, Matrix, Paint, PaintStyle, Path as SkPath};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::num::NonZeroU32;
@@ -36,14 +37,21 @@ use winit::window::{Icon, Theme, Window, WindowAttributes, WindowId};
 pub enum UserEvent {
     Request(ipc::Request),
     Menu(String),
+    /// A newer release has been downloaded and can be installed.
+    UpdateReady(updater::Update),
+    /// The result of a manual "Check for Updates", when there's nothing to install.
+    UpdateStatus(String),
 }
 
+/// Fields drop in declaration order: Skia objects, then the GL surface and context, and the
+/// window last. Destroying the window first leaves the GL driver tearing down a context whose
+/// window is gone, which hangs on exit.
 struct Gl {
-    window: Window,
     surface: skia_safe::Surface,
+    gr: skia_safe::gpu::DirectContext,
     gl_surface: GlWinSurface<WindowSurface>,
     gl_context: PossiblyCurrentContext,
-    gr: skia_safe::gpu::DirectContext,
+    window: Window,
     fb_info: FramebufferInfo,
     samples: usize,
     stencil: usize,
@@ -118,6 +126,14 @@ struct App {
     scans: Vec<Scan>,
     /// Top-level frames the agent is working in: first and latest activity.
     working: HashMap<String, (Instant, Instant)>,
+    proxy: EventLoopProxy<UserEvent>,
+    /// A downloaded update waiting to be installed, and whether its banner was dismissed.
+    update: Option<updater::Update>,
+    banner_hidden: bool,
+    /// Banner button under the pointer: 0 = install now, 1 = next launch.
+    banner_hover: Option<usize>,
+    ui_title: crate::uitext::UiText,
+    ui_body: crate::uitext::UiText,
     port: u16,
     token: String,
     last_poll: Instant,
@@ -130,8 +146,30 @@ struct App {
 const MAX_RECENT: usize = 12;
 
 pub fn run(file: Option<PathBuf>) -> Result<()> {
+    if updater::enabled() {
+        updater::cleanup();
+        // "Install on next launch": swap in the new version, then start it instead.
+        if let Some(exe) = updater::install_pending() {
+            if updater::relaunch(&exe, file.as_deref()).is_ok() {
+                return Ok(());
+            }
+        }
+    }
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy: EventLoopProxy<UserEvent> = event_loop.create_proxy();
+    if updater::enabled() {
+        let p = proxy.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(10));
+            loop {
+                if let Ok(Some(u)) = updater::check() {
+                    let _ = p.send_event(UserEvent::UpdateReady(u));
+                }
+                std::thread::sleep(updater::INTERVAL);
+            }
+        });
+    }
+    let app_proxy = proxy.clone();
     let menu_proxy = Mutex::new(proxy.clone());
     MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
         let _ = menu_proxy.lock().unwrap().send_event(UserEvent::Menu(e.id.0));
@@ -170,6 +208,12 @@ pub fn run(file: Option<PathBuf>) -> Result<()> {
         anims: Vec::new(),
         scans: Vec::new(),
         working: HashMap::new(),
+        proxy: app_proxy,
+        update: None,
+        banner_hidden: false,
+        banner_hover: None,
+        ui_title: crate::uitext::UiText::new_styled(15.0, FontStyle::bold()).ok_or_else(|| anyhow!("no system font"))?,
+        ui_body: crate::uitext::UiText::new(13.0).ok_or_else(|| anyhow!("no system font"))?,
         port,
         token,
         last_poll: Instant::now(),
@@ -350,6 +394,20 @@ impl App {
         self.redraw();
     }
 
+    /// The "update ready" banner and its two buttons (install now, next launch), when showing.
+    fn banner(&self) -> Option<(skia_safe::Rect, [skia_safe::Rect; 2])> {
+        if self.update.is_none() || self.banner_hidden {
+            return None;
+        }
+        let (ww, wh) = self.size();
+        let w = 460f32.min(ww - 32.0);
+        let panel = skia_safe::Rect::from_xywh((ww - w) / 2.0, wh - 128.0 - 24.0, w, 128.0);
+        let bw = (w - 40.0 - 12.0) / 2.0;
+        let install = skia_safe::Rect::from_xywh(panel.left + 20.0, panel.top + 72.0, bw, 36.0);
+        let later = skia_safe::Rect::from_xywh(install.right + 12.0, install.top, bw, 36.0);
+        Some((panel, [install, later]))
+    }
+
     /// The light/dark switch in the bottom-right corner (logical px).
     fn theme_switch_rect(&self) -> skia_safe::Rect {
         let (ww, wh) = self.size();
@@ -380,7 +438,7 @@ impl App {
             &item("reload", "Re&load from Disk", None, Some(Code::F5)),
         ]);
         #[cfg(not(target_os = "macos"))]
-        let _ = file.append_items(&[&sep(), &item("exit", "E&xit", None, None)]);
+        let _ = file.append_items(&[&sep(), &item("check_updates", "Check for &Updates…", None, None), &sep(), &item("exit", "E&xit", None, None)]);
         let edit = Submenu::new("&Edit", true);
         let _ = edit.append_items(&[
             &item("undo", "&Undo", cmd, Some(Code::KeyZ)),
@@ -412,6 +470,7 @@ impl App {
             let app = Submenu::new("study", true);
             let _ = app.append_items(&[
                 &PredefinedMenuItem::about(None, None),
+                &item("check_updates", "Check for Updates…", None, None),
                 &sep(),
                 &PredefinedMenuItem::hide(None),
                 &PredefinedMenuItem::hide_others(None),
@@ -550,6 +609,40 @@ impl App {
             "recent_clear" => {
                 self.recent.clear();
                 self.save_recent();
+            }
+            "check_updates" => {
+                if !updater::enabled() {
+                    self.error("Updates", "This copy of study was built from source; update it with git pull and cargo install.");
+                } else if self.update.is_some() {
+                    self.banner_hidden = false;
+                    self.redraw();
+                } else {
+                    let p = self.proxy.clone();
+                    std::thread::spawn(move || {
+                        let ev = match updater::check() {
+                            Ok(Some(u)) => UserEvent::UpdateReady(u),
+                            Ok(None) => UserEvent::UpdateStatus(format!("study {} is the latest version.", updater::current())),
+                            Err(e) => UserEvent::UpdateStatus(format!("Could not check for updates:\n{e}")),
+                        };
+                        let _ = p.send_event(ev);
+                    });
+                }
+            }
+            "update_install" => {
+                let Some(u) = self.update.clone() else { return };
+                let file = self.engine.as_ref().and_then(|e| e.path().map(Path::to_path_buf));
+                self.save_camera();
+                match updater::install(&u).and_then(|exe| updater::relaunch(&exe, file.as_deref())) {
+                    Ok(()) => el.exit(),
+                    Err(e) => self.error("Could not install the update", e),
+                }
+            }
+            "update_later" => {
+                if let Some(u) = &self.update {
+                    updater::set_pending(u);
+                }
+                self.banner_hidden = true;
+                self.redraw();
             }
             other => {
                 if let Some(p) = other.strip_prefix("recent:").and_then(|i| i.parse::<usize>().ok()).and_then(|i| self.recent.get(i).cloned()) {
@@ -748,6 +841,7 @@ impl App {
         let cam = self.cam;
         let dark = self.dark;
         let switch = self.theme_switch_rect();
+        let banner = self.banner();
 
         // Progress of pen animations, keyed for the renderer.
         let now = Instant::now();
@@ -886,6 +980,9 @@ impl App {
             self.ui.draw(canvas, msg, ((ww - tw) / 2.0, wh / 2.0), &label);
         }
         draw_theme_switch(canvas, switch, dark);
+        if let (Some((panel, buttons)), Some(u)) = (banner, &self.update) {
+            draw_banner(canvas, panel, buttons, &u.version, self.banner_hover, &self.ui_title, &self.ui_body);
+        }
         canvas.restore();
     }
 
@@ -1015,6 +1112,53 @@ fn draw_working(canvas: &skia_safe::Canvas, r: skia_safe::Rect, radius: f32, str
     font.draw(canvas, label, (badge.left + 20.0, badge.center_y() + 4.0), &Paint::new(Color4f::new(1.0, 1.0, 1.0, strength), None));
 }
 
+/// The "update ready" banner: a dark card with a title, a line of text and two buttons.
+fn draw_banner(canvas: &skia_safe::Canvas, panel: skia_safe::Rect, buttons: [skia_safe::Rect; 2], version: &str, hover: Option<usize>, title: &crate::uitext::UiText, body: &crate::uitext::UiText) {
+    let rr = skia_safe::RRect::new_rect_xy(panel, 14.0, 14.0);
+    let mut shadow = Paint::new(Color4f::new(0.0, 0.0, 0.0, 0.35), None);
+    shadow.set_anti_alias(true);
+    shadow.set_mask_filter(skia_safe::MaskFilter::blur(skia_safe::BlurStyle::Normal, 12.0, None));
+    canvas.save();
+    canvas.translate((0.0, 6.0));
+    canvas.draw_rrect(rr, &shadow);
+    canvas.restore();
+    let mut bg = Paint::new(Color4f::new(0.10, 0.10, 0.11, 0.98), None);
+    bg.set_anti_alias(true);
+    canvas.draw_rrect(rr, &bg);
+    let mut edge = Paint::new(Color4f::new(1.0, 1.0, 1.0, 0.08), None);
+    edge.set_anti_alias(true);
+    edge.set_style(PaintStyle::Stroke);
+    canvas.draw_rrect(rr, &edge);
+
+    let white = Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
+    title.draw(canvas, "Update Ready", (panel.left + 20.0, panel.top + 32.0), &white);
+    let msg = format!("study {version} has been downloaded and is ready to install.");
+    body.draw(canvas, &msg, (panel.left + 20.0, panel.top + 55.0), &Paint::new(Color4f::new(0.66, 0.66, 0.70, 1.0), None));
+
+    for (i, (b, label)) in buttons.iter().zip(["Install and Restart", "Install on next launch"]).enumerate() {
+        let brr = skia_safe::RRect::new_rect_xy(*b, 8.0, 8.0);
+        let hot = hover == Some(i);
+        let mut p = Paint::default();
+        p.set_anti_alias(true);
+        let text = if i == 0 {
+            p.set_color4f(if hot { Color4f::new(0.88, 0.88, 0.90, 1.0) } else { Color4f::new(1.0, 1.0, 1.0, 1.0) }, None);
+            canvas.draw_rrect(brr, &p);
+            Color4f::new(0.07, 0.07, 0.08, 1.0)
+        } else {
+            if hot {
+                p.set_color4f(Color4f::new(1.0, 1.0, 1.0, 0.08), None);
+                canvas.draw_rrect(brr, &p);
+            }
+            p.set_color4f(Color4f::new(1.0, 1.0, 1.0, 0.22), None);
+            p.set_style(PaintStyle::Stroke);
+            canvas.draw_rrect(brr, &p);
+            Color4f::new(1.0, 1.0, 1.0, 1.0)
+        };
+        let tw = body.measure(label);
+        body.draw(canvas, label, (b.center_x() - tw / 2.0, b.center_y() + 4.5), &Paint::new(text, None));
+    }
+}
+
 /// A two-segment light/dark switch: sun on the left, moon on the right.
 fn draw_theme_switch(canvas: &skia_safe::Canvas, r: skia_safe::Rect, dark: bool) {
     let (track, knob, fg, fg_dim) = if dark {
@@ -1077,8 +1221,22 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, el: &ActiveEventLoop, ev: UserEvent) {
         match ev {
+            UserEvent::Request(req) if req.tool == "command" => {
+                // Development aid: run a menu command by id.
+                let id = req.args.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                let _ = req.reply.send(json!({"content": [{"type": "text", "text": format!("ran {id}")}], "isError": false}));
+                self.command(el, &id);
+            }
             UserEvent::Request(req) => self.handle_request(req),
             UserEvent::Menu(id) => self.command(el, &id),
+            UserEvent::UpdateReady(u) => {
+                self.update = Some(u);
+                self.banner_hidden = false;
+                self.redraw();
+            }
+            UserEvent::UpdateStatus(msg) => {
+                rfd::MessageDialog::new().set_title("study").set_description(msg).show();
+            }
         }
     }
 
@@ -1150,7 +1308,15 @@ impl ApplicationHandler<UserEvent> for App {
                     self.redraw();
                 } else if let Some(e) = &self.engine {
                     let (dx, dy) = self.to_doc(x, y);
-                    let h = if self.theme_switch_rect().contains(skia_safe::Point::new(x, y)) { None } else { e.hit_test(dx, dy) };
+                    let pt = skia_safe::Point::new(x, y);
+                    let over_banner = self.banner().map(|(panel, buttons)| (panel.contains(pt), buttons.iter().position(|b| b.contains(pt))));
+                    let banner_hover = over_banner.and_then(|(_, b)| b);
+                    if banner_hover != self.banner_hover {
+                        self.banner_hover = banner_hover;
+                        self.redraw();
+                    }
+                    let blocked = over_banner.is_some_and(|(p, _)| p) || self.theme_switch_rect().contains(pt);
+                    let h = if blocked { None } else { e.hit_test(dx, dy) };
                     if h != self.hover {
                         self.hover = h;
                         self.redraw();
@@ -1169,8 +1335,18 @@ impl ApplicationHandler<UserEvent> for App {
                 (MouseButton::Middle | MouseButton::Left, ElementState::Released) if self.pan_from.is_some() => self.pan_from = None,
                 (MouseButton::Left, ElementState::Pressed) => {
                     let (x, y) = self.cursor;
+                    let pt = skia_safe::Point::new(x, y);
                     let r = self.theme_switch_rect();
-                    if r.contains(skia_safe::Point::new(x, y)) {
+                    if let Some((panel, buttons)) = self.banner() {
+                        if let Some(i) = buttons.iter().position(|b| b.contains(pt)) {
+                            self.command(el, if i == 0 { "update_install" } else { "update_later" });
+                            return;
+                        }
+                        if panel.contains(pt) {
+                            return;
+                        }
+                    }
+                    if r.contains(pt) {
                         self.set_theme(if x < r.center_x() { ThemePref::Light } else { ThemePref::Dark });
                     } else {
                         self.select_at(x, y, self.mods.shift_key());

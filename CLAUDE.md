@@ -55,3 +55,8 @@ recently focused window's frame as PNG (in `%TEMP%\study-ipc-1.png`) with its dr
 Pushing a `v*` tag (matching `version` in the workspace `Cargo.toml`) also packages `Study.app`
 (ad-hoc signed tarball) and `study.exe` (zip) into a GitHub release. Nothing is tested on a real
 Mac by the agent — macOS-specific behavior is only verified to compile; ask the user to check it.
+Tag builds set `STUDY_RELEASE=1`, which turns on the self-updater (`updater.rs`): it reads
+`releases/latest` and downloads `study-macos-arm64.tar.gz` / `study-windows-x64.exe` — keep those
+asset names stable. Test the update flow with `STUDY_UPDATE_FEED=<local feed.json>` (GitHub
+release JSON whose asset URLs may be local paths) and `study ipc command '{"id":"update_install"}'`.
+Release steps for the user are in the README ("Releasing").

@@ -14,8 +14,12 @@ pub struct UiText {
 
 impl UiText {
     pub fn new(size: f32) -> Option<UiText> {
+        UiText::new_styled(size, FontStyle::normal())
+    }
+
+    pub fn new_styled(size: f32, style: FontStyle) -> Option<UiText> {
         let mgr = FontMgr::new();
-        let typeface = mgr.legacy_make_typeface(None, FontStyle::normal())?;
+        let typeface = mgr.legacy_make_typeface(None, style)?;
         Some(UiText { font: Font::new(typeface, size), mgr, fallback: RefCell::new(HashMap::new()) })
     }
 
@@ -48,7 +52,7 @@ impl UiText {
         let mut cache = self.fallback.borrow_mut();
         let found = cache.entry(ch).or_insert_with(|| {
             let family = self.font.typeface().family_name();
-            let tf: Option<Typeface> = self.mgr.match_family_style_character(family, FontStyle::normal(), &[], ch as i32);
+            let tf: Option<Typeface> = self.mgr.match_family_style_character(family, self.font.typeface().font_style(), &[], ch as i32);
             tf.map(|t| Font::new(t, self.font.size()))
         });
         found.clone().unwrap_or_else(|| self.font.clone())

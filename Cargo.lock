@@ -1661,7 +1661,7 @@ dependencies = [
 
 [[package]]
 name = "pen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "fastrand",
@@ -1934,7 +1934,7 @@ dependencies = [
 
 [[package]]
 name = "render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -2345,12 +2345,13 @@ dependencies = [
 
 [[package]]
 name = "study"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
  "embed-resource",
  "fastrand",
+ "flate2",
  "gl",
  "glutin",
  "glutin-winit",
@@ -2362,6 +2363,8 @@ dependencies = [
  "rquickjs",
  "serde_json",
  "skia-safe",
+ "tar",
+ "ureq",
  "usvg",
  "winit",
 ]

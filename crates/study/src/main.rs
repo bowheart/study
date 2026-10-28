@@ -18,6 +18,7 @@ mod scripts;
 mod svg;
 mod tools;
 mod uitext;
+mod updater;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

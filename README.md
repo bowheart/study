@@ -39,13 +39,25 @@ curl -fsSL https://github.com/bowheart/study/releases/latest/download/study-maco
 This installs `/Applications/Study.app`. The app isn't signed with an Apple Developer ID, so
 install it with the command above: files downloaded by a browser get quarantined and macOS refuses
 to open them ("can't be checked for malicious software"). If that happens, run
-`xattr -dr com.apple.quarantine /Applications/Study.app`. Run the same command to update.
+`xattr -dr com.apple.quarantine /Applications/Study.app`.
 
 ### Windows
 
 Download `study-windows-x64.zip` from the [latest release](https://github.com/bowheart/study/releases/latest),
 extract `study.exe` somewhere permanent (for example `%LOCALAPPDATA%\Programs\study`), and add that
 folder to your PATH. The exe is unsigned, so Windows SmartScreen asks once before the first run.
+
+### Updating
+
+Release builds update themselves. A few seconds after launch, and every six hours while open,
+study checks [GitHub Releases](https://github.com/bowheart/study/releases) and downloads a newer
+version in the background. When it's ready, a banner at the bottom of the window offers
+**Install and Restart** (reopens the same file) or **Install on next launch**. **Check for
+Updates…** (in the study menu on macOS, the File menu on Windows) checks right away. No signing
+or license is involved: the app downloads the release itself, so macOS doesn't quarantine it.
+
+Copies built from source don't self-update; pull and run `cargo install --path crates/study` again.
+Version 0.1.0 predates the updater, so install the next release once with the commands above.
 
 ### From source
 
@@ -141,6 +153,21 @@ Changes made by other programs are picked up automatically. Avoid having the sam
 Pen and study at once: Pen may overwrite study's changes when it saves.
 
 [examples/showcase.pen](examples/showcase.pen) is a sample dashboard Claude built in study.
+
+## Releasing
+
+1. Bump `version` under `[workspace.package]` in `Cargo.toml` (installed apps update only to a
+   higher version).
+2. Commit and push to `master`; CI builds and tests both platforms.
+3. Tag and push the tag:
+
+   ```bash
+   git tag -a v0.2.0 -m "study 0.2.0" && git push origin v0.2.0
+   ```
+
+The tag's workflow run builds release binaries (with the self-updater enabled), packages
+`Study.app` and `study.exe`, and publishes a GitHub release with generated notes. Installed copies
+pick it up within six hours, or immediately via Check for Updates.
 
 ## Files
 
