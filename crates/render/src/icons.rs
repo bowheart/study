@@ -93,8 +93,10 @@ impl Icons {
         }
         self.libs.insert(key.clone(), State::Pending);
         let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            let ok = fetch(&spec, &dir).is_ok();
+        let base = spec.package.rsplit('/').next().unwrap();
+        let url = format!("https://registry.npmjs.org/{}/-/{}-{}.tgz", spec.package, base, spec.version);
+        crate::net::get(url, 256 << 20, move |reply| {
+            let ok = reply.is_ok_and(|bytes| unpack(&spec, &dir, &bytes).is_ok());
             let _ = tx.send((key, ok));
         });
         false
@@ -161,13 +163,10 @@ fn view_box(svg: &str) -> Option<(f32, f32)> {
     (nums.len() == 4).then(|| (nums[2], nums[3]))
 }
 
-fn fetch(lib: &Library, dir: &Path) -> anyhow::Result<()> {
-    let base = lib.package.rsplit('/').next().unwrap();
-    let url = format!("https://registry.npmjs.org/{}/-/{}-{}.tgz", lib.package, base, lib.version);
-    let mut bytes = Vec::new();
-    ureq::get(&url).call()?.body_mut().with_config().limit(256 << 20).reader().read_to_end(&mut bytes)?;
+/// Extracts a library's SVGs from its npm tarball into `dir`.
+fn unpack(lib: &Library, dir: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]));
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.to_string_lossy().to_string();

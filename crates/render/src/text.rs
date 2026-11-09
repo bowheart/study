@@ -45,9 +45,9 @@ impl TextEngine {
 
     fn build(&mut self, t: &TextData, paint: Option<&Paint>, shadows: &[TextShadow]) -> Paragraph {
         let s = &t.style;
-        self.fonts.request(&s.family, s.weight, s.italic);
+        self.fonts.request_text(&s.family, s.weight, s.italic, &t.content);
         let mut ts = SkTextStyle::new();
-        ts.set_font_families(&[s.family.as_str()]);
+        ts.set_font_families(&self.fonts.families(&s.family));
         ts.set_font_size(s.size);
         ts.set_font_style(FontStyle::new(
             Weight::from(s.weight as i32),

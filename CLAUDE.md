@@ -20,6 +20,10 @@ read the relevant section before changing file I/O, layout, rendering, the execu
   MCP process and windows (`ipc.rs`), shared document state (`engine.rs`), QuickJS execute API
   (`api.rs` + `prelude.js`), `script` node runner (`scripts.rs`), SVG import for `Generate` (`svg.rs`),
   screenshots/export/HTML.
+- `crates/web` — the browser viewer: `pen` + `render` compiled to WebAssembly (Emscripten, WebGL2),
+  `js/study-viewer.js` is the API pages use (documented in `crates/web/README.md`). Not a default
+  workspace member; build with its `build.sh`. Script wrapping (`pen::script`) and hit-testing
+  (`RootScene::hit`) are shared with the desktop app.
 - `crates/study/docs/*.md` — the docs *Claude-as-designer* reads via `read_skill`/`get_app_state`
   (compiled in with `include_str!`; rebuild after editing). Keep them accurate to the API.
 - `assets/` — `logo.svg` and the icon rendered from it (`cargo run -p render --example mkicon -- assets/logo.svg assets`).
@@ -31,6 +35,7 @@ cargo build --release                       # target/release/study.exe
 cargo test --workspace                      # layout, undo, SVG import, script tests
 cargo run -p pen --example roundtrip -- <files.pen...>   # each must re-serialize byte-identical
 cargo install --path crates/study           # what the user's MCP registration runs
+crates/web/build.sh                         # web viewer into crates/web/dist (needs ~/emsdk)
 ```
 
 Manual end-to-end checks: open a window on a scratch `.pen`, then pipe requests into

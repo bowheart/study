@@ -34,12 +34,8 @@ impl Images {
             self.cache.insert(key.to_string(), State::Pending);
             let tx = self.tx.clone();
             let url = key.to_string();
-            std::thread::spawn(move || {
-                let data = ureq::get(&url)
-                    .call()
-                    .ok()
-                    .and_then(|mut r| r.body_mut().with_config().limit(64 << 20).read_to_vec().ok());
-                let _ = tx.send((url, data));
+            crate::net::get(url.clone(), 64 << 20, move |reply| {
+                let _ = tx.send((url, reply.ok()));
             });
             return None;
         }
@@ -47,6 +43,11 @@ impl Images {
         let out = img.clone();
         self.cache.insert(key.to_string(), img.map(State::Ready).unwrap_or(State::Failed));
         out
+    }
+
+    /// Drops a cached image, so a replaced file is read again.
+    pub fn forget(&mut self, key: &str) {
+        self.cache.remove(key);
     }
 
     pub fn poll(&mut self) -> bool {

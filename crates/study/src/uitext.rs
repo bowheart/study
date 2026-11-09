@@ -70,3 +70,13 @@ impl UiText {
         }
     }
 }
+
+impl render::overlay::Label for UiText {
+    fn measure(&self, s: &str) -> f32 {
+        UiText::measure(self, s)
+    }
+
+    fn draw(&self, canvas: &Canvas, s: &str, at: (f32, f32), paint: &Paint) {
+        UiText::draw(self, canvas, s, at, paint)
+    }
+}

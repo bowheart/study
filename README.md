@@ -154,6 +154,29 @@ Pen and study at once: Pen may overwrite study's changes when it saves.
 
 [examples/showcase.pen](examples/showcase.pen) is a sample dashboard Claude built in study.
 
+## Web viewer
+
+study's canvas also runs in the browser. It uses the same Rust layout and Skia renderer, compiled
+to WebAssembly and drawn with WebGL2, so a web app can show `.pen` files and watch agents work
+on them.
+
+- **Rendering:** every font script, images, shaders, `imports` and `script` nodes, the latter
+  run in a sandboxed worker.
+- **Interaction:** selection and hover like the desktop app, plus events and node info to build
+  a toolbar on, for example "ask the AI about this".
+- **Live agent work:** run the agents' MCP server headless:
+
+  ```bash
+  STUDY_HEADLESS=1 STUDY_EVENTS=<file> STUDY_SELECTION=<file> study mcp
+  ```
+
+  It logs what each call read and changed for the page to replay, and agents see the selection
+  the user made in the page.
+
+Build it with `crates/web/build.sh` (needs the Emscripten SDK). See
+[crates/web/README.md](crates/web/README.md) for embedding, the API, files and scripts, and how
+fonts load.
+
 ## Files
 
 `~/.study` holds downloaded fonts and icon sets, window state (recent files, cameras, theme) and

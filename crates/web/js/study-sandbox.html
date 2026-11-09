@@ -1,0 +1,63 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>study script sandbox</title>
+<!--
+  Runs .pen `script` nodes for study-viewer.js. The viewer loads this page in an iframe with
+  sandbox="allow-scripts", which gives it an opaque origin: scripts can't read the host app's
+  cookies, storage or DOM. Each script runs in a worker, one at a time, and is cut off after a
+  time limit.
+-->
+<script>
+  const WORKER = `onmessage = (e) => {
+    try {
+      postMessage({ ok: true, text: String((0, eval)(e.data)) });
+    } catch (err) {
+      postMessage({ ok: false, text: String((err && err.message) || err) });
+    }
+  };`;
+  let worker = null;
+  const queue = [];
+  let current = null;
+
+  // Browsers differ in which worker URLs an opaque origin may start.
+  function startWorker() {
+    try {
+      return new Worker(URL.createObjectURL(new Blob([WORKER], { type: "text/javascript" })));
+    } catch {
+      return new Worker("data:text/javascript," + encodeURIComponent(WORKER));
+    }
+  }
+
+  function next() {
+    if (current || !queue.length) return;
+    current = queue.shift();
+    try {
+      worker ??= startWorker();
+    } catch (err) {
+      return finish({ ok: false, text: `can't start a worker for scripts: ${err.message}` });
+    }
+    const timer = setTimeout(() => {
+      worker.terminate();
+      worker = null;
+      finish({ ok: false, text: `timed out after ${current.timeout} ms` });
+    }, current.timeout);
+    worker.onmessage = (e) => {
+      clearTimeout(timer);
+      finish(e.data);
+    };
+    worker.postMessage(current.code);
+  }
+
+  function finish(result) {
+    parent.postMessage({ studyScript: { id: current.id, ...result } }, "*");
+    current = null;
+    next();
+  }
+
+  addEventListener("message", (e) => {
+    if (e.source !== parent || !e.data?.studyScript) return;
+    queue.push(e.data.studyScript);
+    next();
+  });
+  parent.postMessage({ studyScriptReady: true }, "*");
+</script>

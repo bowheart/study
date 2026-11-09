@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# crates/web only builds for wasm32-unknown-emscripten (see crates/web/build.sh).
+default-members = ["crates/pen", "crates/render", "crates/study"]
 
 [workspace.package]
 edition = "2021"

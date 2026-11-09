@@ -139,7 +139,9 @@ impl Server {
                     Route::Headless(key) => {
                         let engine = self.headless.get_mut(&key).unwrap();
                         engine.reload_if_changed();
-                        tools::execute(engine, args)
+                        let result = tools::execute(engine, args);
+                        record_presence(engine);
+                        result
                     }
                     Route::Error(e) => ipc::tool_error(&e),
                 }
@@ -162,6 +164,21 @@ impl Server {
                 for w in &windows[1..] {
                     out.push_str(&format!("- {}\n", w.file.as_ref().map(|f| f.display().to_string()).unwrap_or_else(|| "(no document)".into())));
                 }
+            }
+        } else if let Some((file, selection)) = host_view() {
+            match self.route(Some(&file)) {
+                Route::Headless(key) => {
+                    let engine = self.headless.get_mut(&key).unwrap();
+                    engine.reload_if_changed();
+                    engine.selection = selection;
+                    engine.prune_selection();
+                    out.push_str(&tools::app_state(engine, None));
+                }
+                Route::Window(inst) => match ipc::send(&inst, "get_app_state", &json!({})) {
+                    Ok(v) => out.push_str(v["content"][0]["text"].as_str().unwrap_or("")),
+                    Err(e) => out.push_str(&format!("(could not reach the study window: {e})\n")),
+                },
+                Route::Error(e) => out.push_str(&format!("{e}\n")),
             }
         } else if !self.headless.is_empty() {
             out.push_str("No study window is open. Documents open headlessly in this session:\n");
@@ -219,6 +236,38 @@ enum Route {
 
 fn text(s: String) -> Value {
     json!({"content": [{"type": "text", "text": s}], "isError": false})
+}
+
+/// What the user is looking at in a host app (like one embedding the web viewer): with
+/// `STUDY_SELECTION=<file>`, that file holds `{"file": "<.pen path>", "selection": ["id", ...]}`
+/// and is read on every call. Headless `get_app_state` then reports that document and selection
+/// the way a window reports its own.
+fn host_view() -> Option<(PathBuf, Vec<String>)> {
+    let path = std::env::var_os("STUDY_SELECTION")?;
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let file = PathBuf::from(v["file"].as_str()?);
+    let selection = v["selection"].as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect()).unwrap_or_default();
+    Some((absolute(&file), selection))
+}
+
+/// What a headless execute call did, for a host app to replay in the web viewer (`crates/web`):
+/// with `STUDY_EVENTS=<file>`, one JSON line per call that read or changed something —
+/// `{"file", "time", "read", "edited", "drawn"}` (node ids read, top-level frames changed,
+/// path nodes created). Windows show the same thing themselves.
+fn record_presence(engine: &mut Engine) {
+    let read = std::mem::take(&mut engine.fresh_reads);
+    let edited = std::mem::take(&mut engine.touched_roots);
+    let drawn = std::mem::take(&mut engine.fresh_paths);
+    let Some(log) = std::env::var_os("STUDY_EVENTS") else { return };
+    if read.is_empty() && edited.is_empty() && drawn.is_empty() {
+        return;
+    }
+    let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    let line = json!({"file": engine.path(), "time": time, "read": read, "edited": edited, "drawn": drawn});
+    let written = std::fs::OpenOptions::new().create(true).append(true).open(&log).and_then(|mut f| writeln!(f, "{line}"));
+    if let Err(e) = written {
+        eprintln!("study: could not write STUDY_EVENTS ({}): {e}", PathBuf::from(log).display());
+    }
 }
 
 fn absolute(p: &Path) -> PathBuf {

@@ -84,8 +84,27 @@ jobs:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
 
+  # The browser viewer (crates/web): study-viewer.js + study-web.js + study_web.wasm.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-emscripten
+      - uses: Swatinem/rust-cache@v2
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 7.0.0
+      - run: crates/web/build.sh
+      - run: cd crates/web/dist && zip ../../../study-web.zip study-viewer.js study-web.js study_web.wasm study-sandbox.html demo.html showcase.pen
+      - uses: actions/upload-artifact@v4
+        with:
+          name: study-web.zip
+          path: study-web.zip
+
   release:
-    needs: build
+    needs: [build, web]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:

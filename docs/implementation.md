@@ -131,6 +131,74 @@ style (variables and themes applied, instances expanded) plus computed rects and
   HTML+CSS / Tailwind generation.
 - Release builds use the Windows subsystem (no console); `mcp` and `ipc` attach to the parent console.
 
+## Web viewer (`crates/web`)
+
+- **Shape.** `pen` + `render` compiled to `wasm32-unknown-emscripten` (a bin crate, kept out of
+  the workspace's `default-members`), drawing through a WebGL2 context the page creates.
+  `viewer.rs` holds one document, a camera, selection/hover and the presence overlays, and
+  exports C functions (`study_*`). `js/study-viewer.js` is the page-facing API (an
+  `EventTarget`), and `crates/web/README.md` documents it for embedders. Everything runs on the
+  main thread.
+- **Skia.** rust-skia publishes a prebuilt wasm Skia only for `gl`+`svg`+`textlayout` *with*
+  `webp`, so the web crate asks for exactly that, gated on emscripten. Native builds keep their
+  own feature set and prebuilt binaries.
+- **setjmp/longjmp.** That Skia (FreeType, libpng, libjpeg) was compiled for Emscripten's
+  JavaScript SjLj: `invoke_*` imports plus `emscripten_longjmp`. rustc links with
+  `-fwasm-exceptions`, and Emscripten refuses to combine the two. `src/sjlj.cpp` implements
+  `invoke_*` and `emscripten_longjmp` in C++ on top of wasm exceptions. `build.rs` passes the file
+  to em++ on the link line. If Skia starts using new signatures, the link fails with an
+  assertion about "invoke_ functions". Add them to the generated list at the bottom of
+  `sjlj.cpp` (`llvm-nm` on `libskia.a` lists them).
+- **Network.** `render::net::get` is the one way the renderer downloads. Native builds use a
+  thread plus ureq. On the web, requests queue up, the page drains them after each frame
+  (`study_requests`), fetches them (through the `fetch` option), and answers with
+  `study_fulfill`.
+- **Fonts on the web.** `render/src/fonts/web.rs` mirrors a browser's web-font loading:
+  - Google's per-script WOFF2 subsets load lazily by `unicode-range` for the characters each
+    text uses (`Fonts::request_text`). Subsets are decoded with `woff2-patched`.
+  - The base (`latin`) subset registers under the family name, the others as `Family#subset`.
+    `Fonts::families` lists them, then the loaded fallback families, as the paragraph's family
+    list.
+  - A subset's typeface overrides its declared range once loaded (`covers`), because Noto Sans
+    Math has no range at all and Symbols 2 claims ⌘ without having it.
+  - Stylesheet arrivals count as font changes, so texts relayout and request the subsets they
+    now know about.
+  - The UI font for frame titles is Inter, downloaded like any document font, because the page
+    has no system fonts.
+- **Files.** The page's files live in Emscripten's in-memory filesystem under `/doc/<path>`.
+  - `study_file_refs` scans the document's JSON string literals for relative paths with file
+    extensions (images, shader and script sources, `.pen` imports). It recurses into imported
+    documents already present and returns the missing ones.
+  - `load()` in JS fetches those through `readFile` before `study_load`, and repeats while
+    imports reveal more.
+  - `doc.path` is set to `/doc/<path>`, so `Imports::load`, image and shader resolution and
+    script URIs all work unchanged. The disk caches in `~/.study` are in memory too, so they
+    last one page load.
+- **Scripts.**
+  - `pen::script` holds the code wrapping (pencil object, seeded `Math.random`) and output
+    parsing. Desktop evaluates it with QuickJS (`scripts.rs`); the web hands the wrapped code to
+    the page (`study_script_jobs`).
+  - The page runs it in `study-sandbox.html`: an `allow-scripts` iframe with an opaque origin and
+    a killable worker. Results come back through `study_script_result`, and the next frame
+    rebuilds roots with script nodes.
+  - In this app's embedded browser a sandboxed iframe loaded by URL never ran its script, so the
+    viewer falls back to `srcdoc` after 2 s.
+- **Selection.** Hit-testing and node transforms are shared with the desktop
+  (`RootScene::hit`/`transform` in `pen::scene`). Click semantics, Enter/Shift+Enter and the
+  outline drawing mirror `gui.rs`. `study_node_info` gives ids, the tree and document/screen
+  boxes, `study_node_json` the source JSON, and `study_snapshot` a PNG via
+  `render::offscreen` (like the MCP screenshot tool).
+- **Performance.** `load` reparses and relays out the whole document: 1 ms for the showcase,
+  0.7 s for 230K nodes, 3.3 s for 920K. Frames keep up with a 165 Hz display while panning at
+  920K nodes; zooming through mid levels averages ~17 ms while thumbnails rebuild. Incremental
+  reloads (diffing roots) are the next step if large files change often.
+- **MCP for host apps.** Headless `study mcp` with `STUDY_EVENTS=<file>` appends one JSON line
+  per execute call (`record_presence`). `STUDY_SELECTION=<file>` (`host_view`) names the
+  document and selection the user has in the page, and headless `get_app_state` reports them
+  like a window does.
+- **Build environment.** `build.sh` puts the SDK's own Python and Node on `PATH` and links with
+  `em++`, because rustc's default `emcc.bat` is gone from newer SDKs.
+
 ## Known gaps
 
 Image generation / stock photos, the `browser` tool, exact parity of seeded randomness in scripts.

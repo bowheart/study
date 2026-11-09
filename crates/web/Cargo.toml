@@ -1,0 +1,16 @@
+[package]
+name = "study-web"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pen = { path = "../pen" }
+render = { path = "../render" }
+skia-safe = { version = "0.156", features = ["gl", "textlayout", "svg"] }
+gl = "0.14"
+serde_json.workspace = true
+
+# rust-skia's prebuilt wasm Skia with GL + SVG + text layout also includes WebP; asking for exactly
+# that feature set downloads it instead of compiling Skia from source.
+[target.'cfg(target_os = "emscripten")'.dependencies]
+skia-safe = { version = "0.156", features = ["gl", "textlayout", "svg", "webp"] }

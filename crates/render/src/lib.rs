@@ -2,7 +2,9 @@ pub mod draw;
 pub mod fonts;
 pub mod icons;
 pub mod images;
+pub mod net;
 pub mod offscreen;
+pub mod overlay;
 pub mod shaders;
 pub mod text;
 

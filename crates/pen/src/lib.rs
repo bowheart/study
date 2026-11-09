@@ -4,6 +4,7 @@ pub mod instance;
 pub mod json;
 pub mod layout;
 pub mod scene;
+pub mod script;
 pub mod style;
 pub mod validate;
 pub mod vars;
