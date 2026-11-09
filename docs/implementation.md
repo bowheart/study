@@ -110,6 +110,9 @@ style (variables and themes applied, instances expanded) plus computed rects and
   register (≤20 s); else (or with `STUDY_HEADLESS`) open the document in-process.
 - `ipc.rs`: each window listens on 127.0.0.1 with a random port + token and writes
   `~/.study/instances/<pid>.json` (open file, focus time). Stale entries are pruned by pid.
+- Headless build: everything window-related (`gui.rs`, `uitext.rs`, `updater.rs`, winit/glutin/muda/
+  rfd/ureq) is behind the default `gui` feature. `--no-default-features` builds the MCP server
+  alone (the Linux release): it never launches windows and refuses `study <file>`.
 - `gui.rs`: winit + glutin GL surface wrapped as a Skia surface; muda native menu bar with
   accelerators: on macOS they are real key equivalents (winit never sees those keys); on Windows
   they only label the items, because nothing calls `TranslateAccelerator`, so winit handles the keys. Theme =
@@ -192,6 +195,10 @@ style (variables and themes applied, instances expanded) plus computed rects and
   0.7 s for 230K nodes, 3.3 s for 920K. Frames keep up with a 165 Hz display while panning at
   920K nodes; zooming through mid levels averages ~17 ms while thumbnails rebuild. Incremental
   reloads (diffing roots) are the next step if large files change often.
+- **Canvas controls.** The breadcrumb, zoom buttons and light/dark switch are `render::controls`,
+  shared with the desktop window. Each frame, the viewer lays them out from the selection
+  (`RootScene::ancestors`) and the camera, draws them last, and checks pointer input against
+  them (`study_on_controls`/`study_press`) before the canvas sees it. `Show` turns each one off.
 - **MCP for host apps.** Headless `study mcp` with `STUDY_EVENTS=<file>` appends one JSON line
   per execute call (`record_presence`). `STUDY_SELECTION=<file>` (`host_view`) names the
   document and selection the user has in the page, and headless `get_app_state` reports them

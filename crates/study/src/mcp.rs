@@ -210,7 +210,7 @@ impl Server {
             return Route::Window(w.clone());
         }
         // Open it in a new study window, unless windows are disabled.
-        if std::env::var_os("STUDY_HEADLESS").is_none() {
+        if cfg!(feature = "gui") && std::env::var_os("STUDY_HEADLESS").is_none() {
             if let Some(w) = launch_window(&file, &key) {
                 self.headless.remove(&key);
                 return Route::Window(w);

@@ -4,11 +4,14 @@
 //! `study mcp`         run the MCP server on stdio (configure this in Claude Code)
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+// The headless build (no `gui` feature) leaves window-only helpers unused.
+#![cfg_attr(not(feature = "gui"), allow(dead_code))]
 
 mod api;
 mod docs;
 mod engine;
 mod export;
+#[cfg(feature = "gui")]
 mod gui;
 mod html;
 mod ipc;
@@ -17,7 +20,9 @@ mod shot;
 mod scripts;
 mod svg;
 mod tools;
+#[cfg(feature = "gui")]
 mod uitext;
+#[cfg(feature = "gui")]
 mod updater;
 
 fn main() {
@@ -31,7 +36,9 @@ fn main() {
             // Development aid: send one request to the most recently focused window.
             let tool = args.get(1).cloned().unwrap_or_default();
             let a: serde_json::Value = args.get(2).and_then(|s| serde_json::from_str(s).ok()).unwrap_or(serde_json::json!({}));
-            let Some(inst) = ipc::instances().into_iter().next() else { eprintln!("no study window"); std::process::exit(1) };
+            // STUDY_IPC_PID picks a window by process id; otherwise the most recently focused one.
+            let pid = std::env::var("STUDY_IPC_PID").ok().and_then(|p| p.parse::<u32>().ok());
+            let Some(inst) = ipc::instances().into_iter().find(|i| pid.is_none_or(|p| i.pid == p)) else { eprintln!("no study window"); std::process::exit(1) };
             let r = ipc::send(&inst, &tool, &a).unwrap();
             for (i, c) in r["content"].as_array().into_iter().flatten().enumerate() {
                 match c["type"].as_str() {
@@ -51,10 +58,18 @@ fn main() {
             println!("study [file.pen]   open the canvas\nstudy mcp          run the MCP server on stdio");
         }
         _ => {
-            let file = args.iter().find(|a| !a.starts_with('-')).map(std::path::PathBuf::from);
-            if let Err(e) = gui::run(file) {
-                eprintln!("study: {e:#}");
-                std::process::exit(1);
+            #[cfg(feature = "gui")]
+            {
+                let file = args.iter().find(|a| !a.starts_with('-')).map(std::path::PathBuf::from);
+                if let Err(e) = gui::run(file) {
+                    eprintln!("study: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+            #[cfg(not(feature = "gui"))]
+            {
+                eprintln!("study: this build is the headless MCP server only (`study mcp`); it has no window");
+                std::process::exit(2);
             }
         }
     }

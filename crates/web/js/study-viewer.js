@@ -47,6 +47,10 @@ const toBytes = (data) =>
  * @param {string[]} [options.fallbackFonts] Google Fonts families for characters a document's
  *   fonts lack, in order (default: Noto families covering symbols, emoji and the major scripts).
  * @param {boolean} [options.interactive=true] Click to select, hover outlines, keyboard.
+ * @param {{breadcrumb?: boolean, zoom?: boolean, theme?: boolean}} [options.controls] Built-in
+ *   controls drawn on the canvas, all on by default: the selection's breadcrumb (top left), zoom
+ *   buttons and a light/dark switch (bottom right). Turn any off to build your own with
+ *   `breadcrumb`, `select`, `zoomBy`, `fit` and `setTheme`.
  * @param {number} [options.scriptTimeout=5000] Milliseconds a `script` node may run.
  * @param {(file: string) => string} [options.locateFile] URL of study_web.wasm / study-sandbox.html.
  */
@@ -72,6 +76,7 @@ export async function createViewer(canvas, options = {}) {
  * - `viewchange` `{camera: {x, y, zoom}}`: the camera moved. Re-read `node(id).screen` to keep a
  *   toolbar attached.
  * - `warning` `{message}`: a script node failed, an import or file is missing, ...
+ * - `themechange` `{theme}`: the built-in light/dark switch was clicked (`"light"` or `"dark"`).
  */
 export class Viewer extends EventTarget {
   #m;
@@ -86,6 +91,8 @@ export class Viewer extends EventTarget {
   #camera = "";
   #loads = 0;
   #sandbox = null;
+  #theme = "system";
+  #controls = { breadcrumb: true, zoom: true, theme: true };
 
   constructor(canvas, gl, module, options) {
     super();
@@ -99,6 +106,7 @@ export class Viewer extends EventTarget {
     canvas.width = w;
     canvas.height = h;
     this.#v = module._study_new(w, h, dpr);
+    this.setControls(options.controls ?? {});
     if (options.fallbackFonts) this.#withBytes(JSON.stringify(options.fallbackFonts), (p, n) => module._study_set_fallback_fonts(this.#v, p, n));
     this.setTheme(options.theme ?? "system");
     this.#bindInput();
@@ -211,8 +219,13 @@ export class Viewer extends EventTarget {
   }
   get zoom() { return this.camera.zoom; }
 
+  /** `"light"`, `"dark"` or `"system"` (follows the OS). */
+  get theme() { return this.#theme; }
   setTheme(theme) {
+    this.#theme = theme;
     this.#cleanup.find((f) => f.theme)?.();
+    const i = this.#cleanup.findIndex((f) => f.theme);
+    if (i >= 0) this.#cleanup.splice(i, 1);
     const media = matchMedia("(prefers-color-scheme: dark)");
     const apply = () => {
       this.#m._study_set_dark(this.#v, theme === "dark" || (theme === "system" && media.matches));
@@ -225,6 +238,22 @@ export class Viewer extends EventTarget {
       this.#cleanup.push(off);
     }
     apply();
+  }
+
+  /** Shows or hides built-in controls: `{breadcrumb, zoom, theme}`, any subset. */
+  setControls(controls) {
+    Object.assign(this.#controls, controls);
+    const c = this.#controls;
+    this.#m._study_set_controls(this.#v, !!c.breadcrumb, !!c.zoom, !!c.theme);
+    this.redraw();
+  }
+
+  /**
+   * The last selected node and its ancestors, top-level frame first: what the built-in
+   * breadcrumb shows. Select one with `select([node.id])`. @returns {NodeInfo[]}
+   */
+  get breadcrumb() {
+    return (this.#json(this.#m._study_breadcrumb(this.#v)) ?? []).map((id) => this.node(id)).filter(Boolean);
   }
 
   // ---------------------------------------------------------------- agent presence
@@ -388,6 +417,19 @@ export class Viewer extends EventTarget {
     }
   }
 
+  /** A click on a built-in control: the viewer acts, then the page hears about it. */
+  #pressControl(x, y) {
+    const before = this.#selectionIds();
+    const what = this.#json(this.#m._study_press(this.#v, x, y));
+    this.redraw();
+    if (what?.control === "breadcrumb") this.#emitIfSelectionChanged(before);
+    if (what?.control === "theme") {
+      const theme = what.dark ? "dark" : "light";
+      this.setTheme(theme);
+      this.dispatchEvent(new CustomEvent("themechange", { detail: { theme } }));
+    }
+  }
+
   #bindInput() {
     const c = this.#canvas;
     const on = (target, type, f, opts) => {
@@ -432,11 +474,18 @@ export class Viewer extends EventTarget {
       if (e.button !== 0 && e.button !== 1) return;
       e.preventDefault();
       c.focus({ preventScroll: true });
+      const [x, y] = local(e);
+      if (e.button === 0 && this.#m._study_on_controls(this.#v, x, y)) {
+        drag = { id: e.pointerId, control: true };
+        c.setPointerCapture(e.pointerId);
+        return;
+      }
       drag = { id: e.pointerId, x: e.clientX, y: e.clientY, startX: e.clientX, startY: e.clientY, panning: e.button === 1 };
       c.setPointerCapture(e.pointerId);
     });
     on(c, "pointermove", (e) => {
       const [x, y] = local(e);
+      if (drag?.id === e.pointerId && drag.control) return;
       if (drag?.id === e.pointerId) {
         if (!drag.panning && Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) > 4) drag.panning = true;
         if (drag.panning) {
@@ -452,6 +501,7 @@ export class Viewer extends EventTarget {
         const id = this.#str(this.#m._study_hovered(this.#v));
         this.dispatchEvent(new CustomEvent("hover", { detail: { node: id ? this.node(id) : null } }));
       }
+      c.style.cursor = this.#m._study_over_control(this.#v) ? "pointer" : "";
       this.redraw();
     });
     on(c, "pointerleave", () => {
@@ -462,6 +512,11 @@ export class Viewer extends EventTarget {
     });
     const end = (e) => {
       if (drag?.id !== e.pointerId) return;
+      if (drag.control) {
+        drag = null;
+        if (e.type === "pointerup") this.#pressControl(...local(e));
+        return;
+      }
       const click = !drag.panning && e.type === "pointerup";
       drag = null;
       c.style.cursor = "";
@@ -481,6 +536,7 @@ export class Viewer extends EventTarget {
     on(c, "contextmenu", (e) => {
       if (!interactive()) return;
       const [x, y] = local(e);
+      if (this.#m._study_on_controls(this.#v, x, y)) return;
       const node = this.nodeAt(x, y);
       if (node && !this.#selectionIds().includes(node.id)) this.select([node.id]);
       this.dispatchEvent(new CustomEvent("nodecontextmenu", { detail: { node, x, y, event: e } }));

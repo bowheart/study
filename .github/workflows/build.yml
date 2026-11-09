@@ -84,6 +84,28 @@ jobs:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
 
+  # Headless MCP server for Linux hosts (no window, menus or updater): `study mcp`.
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      - run: cargo test -p pen -p render && cargo test -p study --no-default-features
+      - run: cargo build --release -p study --no-default-features
+      - name: Smoke test
+        run: |
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"execute","arguments":{"filePath":"'"$PWD"'/examples/showcase.pen","input":"Print(Get(\"ZcurH\").name)"}}}' \
+            | target/release/study mcp | tee /dev/stderr | grep -q "Tidepool"
+      - run: tar -czf study-linux-x64.tar.gz -C target/release study
+      - uses: actions/upload-artifact@v4
+        with:
+          name: study-linux-x64.tar.gz
+          path: study-linux-x64.tar.gz
+
   # The browser viewer (crates/web): study-viewer.js + study-web.js + study_web.wasm.
   web:
     runs-on: ubuntu-latest
@@ -104,7 +126,7 @@ jobs:
           path: study-web.zip
 
   release:
-    needs: [build, web]
+    needs: [build, linux, web]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:

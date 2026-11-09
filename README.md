@@ -47,6 +47,12 @@ Download `study-windows-x64.zip` from the [latest release](https://github.com/bo
 extract `study.exe` somewhere permanent (for example `%LOCALAPPDATA%\Programs\study`), and add that
 folder to your PATH. The exe is unsigned, so Windows SmartScreen asks once before the first run.
 
+### Linux (headless)
+
+For servers, `study-linux-x64.tar.gz` from the [latest release](https://github.com/bowheart/study/releases/latest)
+is the MCP server alone (`study mcp`), without the window. It needs fontconfig. See
+[crates/web/README.md](crates/web/README.md#on-a-linux-server).
+
 ### Updating
 
 Release builds update themselves. A few seconds after launch, and every 15 minutes while open,
@@ -140,6 +146,8 @@ On macOS use Cmd wherever the table says Ctrl.
 | Wheel / Shift + wheel | Scroll vertically / horizontally |
 | Ctrl + wheel (or pinch) | Zoom at the cursor |
 | Ctrl+0 / Ctrl+1 / Ctrl+2 | Fit everything / 100% / zoom to selection |
+| Breadcrumb (top left) | Click any ancestor of the selection to select it |
+| − / % / + (bottom right) | Zoom out / fit everything / zoom in |
 | Click, Shift+click | Select (Claude sees your selection) |
 | Shift+Enter / Enter | Select parent / first child |
 | Esc | Clear selection |

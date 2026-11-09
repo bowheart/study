@@ -36,12 +36,16 @@ cargo test --workspace                      # layout, undo, SVG import, script t
 cargo run -p pen --example roundtrip -- <files.pen...>   # each must re-serialize byte-identical
 cargo install --path crates/study           # what the user's MCP registration runs
 crates/web/build.sh                         # web viewer into crates/web/dist (needs ~/emsdk)
+cargo build --release -p study --no-default-features   # headless MCP server only (the Linux build)
 ```
 
 Manual end-to-end checks: open a window on a scratch `.pen`, then pipe requests into
 `study mcp` (`cargo run -p pen --example mkreq -- <file.pen> snippet.js...` builds the JSON lines).
-`study ipc debug_frame '{"camera":[x,y,zoom],"theme":"dark","waitMs":300}'` returns the most
-recently focused window's frame as PNG (in `%TEMP%\study-ipc-1.png`) with its draw time.
+`study ipc debug_frame '{"camera":[x,y,zoom],"select":["id"],"pointer":[x,y],"waitMs":300}'` returns
+the most recently focused window's frame as PNG (in `%TEMP%\study-ipc-1.png`) with its draw time.
+`pointer` hovers the canvas controls at that point. The user often has their own window open, so
+set `STUDY_IPC_PID=<pid of your test window>` (from `~/.study/instances/`) to make sure requests go
+to yours. Don't pass `theme`: it's saved to the user's settings.
 
 ## Rules
 

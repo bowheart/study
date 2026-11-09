@@ -19,7 +19,10 @@ There's no editing, panels or undo. Changes come from agents through the `pencil
 crates/web/build.sh        # needs the Emscripten SDK (5.0+) in ~/emsdk or $EMSDK
 ```
 
-Copy these four files from `crates/web/dist/` into one folder in your app's static files:
+Or skip the build: releases include `study-web.zip` with the same files, built by CI.
+
+Copy these four files from `crates/web/dist/` (or the zip) into one folder in your app's static
+files:
 
 | File | What it is |
 | --- | --- |
@@ -67,6 +70,31 @@ Input works like the desktop app:
 Keys work while the canvas has focus, which it gets on click. Pass `interactive: false` to turn
 off selection, hover and keys and keep only pan and zoom.
 
+## Built-in controls
+
+The canvas draws the same controls as the desktop app:
+
+- **Breadcrumb**, top left: shows the selected node and each of its ancestors. Click one to
+  select it, which is how you get from a small element up to its section or the whole frame.
+  Long paths collapse their middle into "…".
+- **Zoom**, bottom right: zoom out, the current percentage (click it to fit everything), and zoom
+  in.
+- **Light/dark switch**, bottom right: clicking it fires `themechange`.
+
+Turn any of them off, at creation or later, and drive the same behavior from your own UI:
+
+```js
+const viewer = await createViewer(canvas, { controls: { theme: false } }); // the app owns the theme
+viewer.setTheme(user.prefersDark ? "dark" : "light");
+viewer.setControls({ breadcrumb: false, zoom: false });
+```
+
+| Built-in control | Do it yourself with |
+| --- | --- |
+| Breadcrumb | `viewer.breadcrumb` (`NodeInfo[]`, top-level frame first) on `select`, then `viewer.select([node.id])` |
+| Zoom | `viewer.zoom` on `viewchange`; `viewer.zoomBy(1.25)`, `viewer.zoomBy(0.8)`, `viewer.fit()` |
+| Theme | `viewer.setTheme("light" \| "dark" \| "system")`, `viewer.theme` |
+
 ## Selection, clicks and a toolbar
 
 Every node is described by a `NodeInfo`:
@@ -103,6 +131,7 @@ Events come from `viewer.addEventListener(type, (e) => …)`, with data in `e.de
 | `hover` | `{ node }` | The node under the pointer changed |
 | `viewchange` | `{ camera }` | The view moved; re-read `node(id).screen` |
 | `warning` | `{ message }` | A script failed, a file is missing, ... |
+| `themechange` | `{ theme }` | The built-in light/dark switch was clicked (`"light"` or `"dark"`) |
 
 For example, a toolbar that follows the selection:
 
@@ -172,6 +201,24 @@ viewer.scan(event.read);      // nodes it read get a scan sweep
 ```
 
 `load` takes 1 ms for a typical file, 0.7 s for 230K nodes and 3.3 s for 920K.
+
+### On a Linux server
+
+Releases include `study-linux-x64.tar.gz`, built on Ubuntu (glibc). It's the MCP server alone,
+with no window, menus or updater, and it never opens windows, so it doesn't need
+`STUDY_HEADLESS`.
+
+- **Dependencies:** it needs fontconfig (`apt install libfontconfig1`).
+- **Fonts for screenshots:** screenshots use the system's fonts for characters a document's
+  fonts lack, so a font package such as `fonts-noto` helps.
+- **Building it yourself:**
+
+  ```bash
+  cargo build --release -p study --no-default-features   # target/release/study
+  ```
+
+Point each agent session's MCP config at it as the `pencil` server, with the environment
+variables above.
 
 ## Files, imports and scripts
 

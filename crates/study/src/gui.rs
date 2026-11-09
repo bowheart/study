@@ -16,6 +16,7 @@ use pen::scene::Rect;
 use raw_window_handle::HasWindowHandle;
 #[cfg(windows)]
 use raw_window_handle::RawWindowHandle;
+use render::controls::{Control, Crumb, Show};
 use render::overlay::{draw_nib, draw_scan, draw_working};
 use render::View;
 use serde_json::{json, Value};
@@ -120,6 +121,8 @@ struct App {
     space_down: bool,
     mods: ModifiersState,
     hover: Option<String>,
+    /// The canvas control under the pointer (breadcrumb, zoom, theme).
+    ctrl_hover: Option<Control>,
     theme: ThemePref,
     dark: bool,
     recent: Vec<PathBuf>,
@@ -203,6 +206,7 @@ pub fn run(file: Option<PathBuf>) -> Result<()> {
         space_down: false,
         mods: ModifiersState::empty(),
         hover: None,
+        ctrl_hover: None,
         theme,
         dark: theme == ThemePref::Dark,
         recent,
@@ -409,11 +413,41 @@ impl App {
         Some((panel, [install, later]))
     }
 
-    /// The light/dark switch in the bottom-right corner (logical px).
-    fn theme_switch_rect(&self) -> skia_safe::Rect {
-        let (ww, wh) = self.size();
-        let zoom_w = self.ui.measure("00000%");
-        skia_safe::Rect::from_xywh(ww - zoom_w - 18.0 - 52.0, wh - 30.0, 52.0, 22.0)
+    /// The last selected node and its ancestors, for the breadcrumb.
+    fn crumbs(&self) -> Vec<Crumb> {
+        let Some(e) = &self.engine else { return Vec::new() };
+        let Some((s, i)) = e.selection.last().and_then(|k| e.locate(k)) else { return Vec::new() };
+        s.ancestors(i)
+            .into_iter()
+            .map(|a| {
+                let n = &s.nodes[a as usize];
+                Crumb { key: n.key().to_string(), label: n.name.as_deref().unwrap_or(&n.id).to_string() }
+            })
+            .collect()
+    }
+
+    /// The breadcrumb, zoom buttons and light/dark switch, laid out for the window (logical px).
+    fn controls(&self) -> render::controls::Layout {
+        let show = Show { breadcrumb: true, zoom: self.engine.is_some(), theme: true };
+        render::controls::layout(show, self.size(), &self.crumbs(), self.cam.zoom, &self.ui)
+    }
+
+    fn press_control(&mut self, c: Control) {
+        let (w, h) = self.size();
+        match c {
+            Control::Crumb(i) => {
+                let key = self.crumbs().get(i).map(|c| c.key.clone());
+                if let (Some(e), Some(key)) = (self.engine.as_mut(), key) {
+                    e.selection = vec![key];
+                }
+                self.redraw();
+            }
+            Control::ZoomOut => self.zoom_at(1.0 / render::controls::ZOOM_STEP, w / 2.0, h / 2.0),
+            Control::ZoomIn => self.zoom_at(render::controls::ZOOM_STEP, w / 2.0, h / 2.0),
+            Control::ZoomLevel => self.fit(None),
+            Control::Light => self.set_theme(ThemePref::Light),
+            Control::Dark => self.set_theme(ThemePref::Dark),
+        }
     }
 
     // ------------------------------------------------------------------ menus
@@ -716,6 +750,12 @@ impl App {
                 if req.args.get("fit").and_then(Value::as_bool) == Some(true) {
                     self.fit(None);
                 }
+                if let (Some(sel), Some(e)) = (req.args.get("select").and_then(Value::as_array), self.engine.as_mut()) {
+                    e.selection = sel.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+                }
+                if let Some([x, y]) = req.args.get("pointer").and_then(Value::as_array).map(|p| [0, 1].map(|i| p.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32)) {
+                    self.ctrl_hover = self.controls().hit(x, y);
+                }
                 if let Some(t) = req.args.get("theme").and_then(Value::as_str) {
                     self.set_theme(match t {
                         "dark" => ThemePref::Dark,
@@ -841,7 +881,7 @@ impl App {
         let (ww, wh) = self.size();
         let cam = self.cam;
         let dark = self.dark;
-        let switch = self.theme_switch_rect();
+        let controls = self.controls();
         let banner = self.banner();
 
         // Progress of pen animations, keyed for the renderer.
@@ -972,15 +1012,12 @@ impl App {
             if let Some((p, _)) = e.renderer.tips.last() {
                 draw_nib(canvas, p.x / sf, p.y / sf);
             }
-            let zoom_txt = format!("{:.0}%", cam.zoom * 100.0);
-            let tw = self.ui.measure(&zoom_txt);
-            self.ui.draw(canvas, &zoom_txt, (ww - tw - 10.0, wh - 10.0), &label);
         } else {
             let msg = "Open a .pen file: File › Open, Ctrl+O, or drop it here";
             let tw = self.ui.measure(msg);
             self.ui.draw(canvas, msg, ((ww - tw) / 2.0, wh / 2.0), &label);
         }
-        draw_theme_switch(canvas, switch, dark);
+        controls.draw(canvas, dark, self.ctrl_hover, &self.ui);
         if let (Some((panel, buttons)), Some(u)) = (banner, &self.update) {
             draw_banner(canvas, panel, buttons, &u.version, self.banner_hover, &self.ui_title, &self.ui_body);
         }
@@ -1053,41 +1090,6 @@ fn draw_banner(canvas: &skia_safe::Canvas, panel: skia_safe::Rect, buttons: [ski
 }
 
 /// A two-segment light/dark switch: sun on the left, moon on the right.
-fn draw_theme_switch(canvas: &skia_safe::Canvas, r: skia_safe::Rect, dark: bool) {
-    let (track, knob, fg, fg_dim) = if dark {
-        (Color4f::new(1.0, 1.0, 1.0, 0.08), Color4f::new(1.0, 1.0, 1.0, 0.16), Color4f::new(0.92, 0.92, 0.95, 1.0), Color4f::new(0.6, 0.6, 0.64, 1.0))
-    } else {
-        (Color4f::new(0.0, 0.0, 0.0, 0.06), Color4f::new(1.0, 1.0, 1.0, 1.0), Color4f::new(0.15, 0.15, 0.17, 1.0), Color4f::new(0.5, 0.5, 0.53, 1.0))
-    };
-    let mut p = Paint::new(track, None);
-    p.set_anti_alias(true);
-    canvas.draw_round_rect(r, r.height() / 2.0, r.height() / 2.0, &p);
-    let half = r.width() / 2.0;
-    let active = skia_safe::Rect::from_xywh(r.left + if dark { half } else { 0.0 } + 2.0, r.top + 2.0, half - 4.0, r.height() - 4.0);
-    p.set_color4f(knob, None);
-    canvas.draw_round_rect(active, active.height() / 2.0, active.height() / 2.0, &p);
-
-    let (sx, sy) = (r.left + half / 2.0, r.center_y());
-    let mut sun = Paint::new(if dark { fg_dim } else { fg }, None);
-    sun.set_anti_alias(true);
-    canvas.draw_circle((sx, sy), 3.0, &sun);
-    sun.set_style(PaintStyle::Stroke);
-    sun.set_stroke_width(1.2);
-    sun.set_stroke_cap(skia_safe::PaintCap::Round);
-    for k in 0..8 {
-        let a = k as f32 * std::f32::consts::FRAC_PI_4;
-        let (c, s) = (a.cos(), a.sin());
-        canvas.draw_line((sx + c * 4.8, sy + s * 4.8), (sx + c * 6.4, sy + s * 6.4), &sun);
-    }
-    let (mx, my) = (r.left + half * 1.5, r.center_y());
-    let mut moon = SkPath::circle((mx, my), 5.0, None);
-    if let Some(m) = moon.op(&SkPath::circle((mx + 3.2, my - 2.4), 4.2, None), skia_safe::PathOp::Difference) {
-        moon = m;
-    }
-    let mut mp = Paint::new(if dark { fg } else { fg_dim }, None);
-    mp.set_anti_alias(true);
-    canvas.draw_path(&moon, &mp);
-}
 
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
@@ -1199,7 +1201,16 @@ impl ApplicationHandler<UserEvent> for App {
                     self.cam.y -= (y - py) / self.cam.zoom;
                     self.pan_from = Some((x, y));
                     self.redraw();
-                } else if let Some(e) = &self.engine {
+                } else {
+                    let controls = self.controls();
+                    let ctl = controls.hit(x, y);
+                    if ctl != self.ctrl_hover {
+                        self.ctrl_hover = ctl;
+                        self.redraw();
+                    }
+                    if let Some(g) = &self.gl {
+                        g.window.set_cursor(if ctl.is_some() { winit::window::CursorIcon::Pointer } else { winit::window::CursorIcon::Default });
+                    }
                     let (dx, dy) = self.to_doc(x, y);
                     let pt = skia_safe::Point::new(x, y);
                     let over_banner = self.banner().map(|(panel, buttons)| (panel.contains(pt), buttons.iter().position(|b| b.contains(pt))));
@@ -1208,8 +1219,8 @@ impl ApplicationHandler<UserEvent> for App {
                         self.banner_hover = banner_hover;
                         self.redraw();
                     }
-                    let blocked = over_banner.is_some_and(|(p, _)| p) || self.theme_switch_rect().contains(pt);
-                    let h = if blocked { None } else { e.hit_test(dx, dy) };
+                    let blocked = over_banner.is_some_and(|(p, _)| p) || controls.covers(x, y);
+                    let h = if blocked { None } else { self.engine.as_ref().and_then(|e| e.hit_test(dx, dy)) };
                     if h != self.hover {
                         self.hover = h;
                         self.redraw();
@@ -1229,7 +1240,6 @@ impl ApplicationHandler<UserEvent> for App {
                 (MouseButton::Left, ElementState::Pressed) => {
                     let (x, y) = self.cursor;
                     let pt = skia_safe::Point::new(x, y);
-                    let r = self.theme_switch_rect();
                     if let Some((panel, buttons)) = self.banner() {
                         if let Some(i) = buttons.iter().position(|b| b.contains(pt)) {
                             self.command(el, if i == 0 { "update_install" } else { "update_later" });
@@ -1239,9 +1249,10 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
-                    if r.contains(pt) {
-                        self.set_theme(if x < r.center_x() { ThemePref::Light } else { ThemePref::Dark });
-                    } else {
+                    let controls = self.controls();
+                    if let Some(c) = controls.hit(x, y) {
+                        self.press_control(c);
+                    } else if !controls.covers(x, y) {
                         self.select_at(x, y, self.mods.shift_key());
                     }
                 }

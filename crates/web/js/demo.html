@@ -9,7 +9,7 @@
   body { display: flex; flex-direction: column; }
   header { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #0002; flex-wrap: wrap; }
   #status { margin-left: auto; color: #666; }
-  main { position: relative; flex: 1; min-height: 0; }
+  main { position: relative; flex: 1; min-height: 0; overflow: hidden; }
   canvas { width: 100%; height: 100%; display: block; }
   #toolbar { position: absolute; display: none; gap: 6px; align-items: center; padding: 6px; border-radius: 10px;
     background: #111827; color: #fff; box-shadow: 0 6px 24px #0004; transform: translate(-50%, calc(-100% - 10px)); white-space: nowrap; }
@@ -25,6 +25,9 @@
   <select id="theme"><option>system</option><option>light</option><option>dark</option></select>
   <button id="fit">Fit</button>
   <button id="agent">Simulate agent</button>
+  <label><input type="checkbox" data-control="breadcrumb" checked> breadcrumb</label>
+  <label><input type="checkbox" data-control="zoom" checked> zoom</label>
+  <label><input type="checkbox" data-control="theme" checked> theme switch</label>
   <span id="status">Drop a .pen file here, or pass ?file=url</span>
 </header>
 <main>
@@ -68,6 +71,11 @@
     viewer.scan(roots.slice(0, 6));
   };
   viewer.addEventListener("warning", (e) => ($("status").textContent = e.detail.message));
+  // Built-in controls can be switched off and replaced by the app's own.
+  for (const box of document.querySelectorAll("[data-control]")) {
+    box.onchange = () => viewer.setControls({ [box.dataset.control]: box.checked });
+  }
+  viewer.addEventListener("themechange", (e) => ($("theme").value = e.detail.theme));
 
   // A toolbar that follows the selection, and the context an "Ask AI" button would send.
   function placeToolbar() {

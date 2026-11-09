@@ -12,6 +12,7 @@ use pen::layout::{compute_bounds, layout};
 use pen::scene::{compile_root_with, graft, Kind, Rect, RootScene, NONE};
 use pen::vars::Vars;
 use pen::{Document, NodeId};
+use render::controls::{Control, Crumb, Show};
 use render::overlay::{draw_nib, draw_scan, draw_working, Label};
 use render::{Renderer, View};
 use serde_json::{json, Map, Value};
@@ -105,6 +106,9 @@ pub struct Viewer {
     working: HashMap<String, (Instant, Instant)>,
     selection: Vec<String>,
     hover: Option<String>,
+    /// Built-in controls to show, and the one under the pointer.
+    show: Show,
+    ctrl_hover: Option<Control>,
     ui: UiFont,
     /// The last string handed to the page (it reads it before the next call).
     out: CString,
@@ -145,6 +149,8 @@ impl Viewer {
             working: HashMap::new(),
             selection: Vec::new(),
             hover: None,
+            show: Show::default(),
+            ctrl_hover: None,
             ui: UiFont(None),
             out: CString::default(),
             blob: Vec::new(),
@@ -350,6 +356,53 @@ impl Viewer {
         render::offscreen::encode(&img, "png", None)
     }
 
+    /// The last selected node and its ancestors, for the breadcrumb.
+    fn crumbs(&self) -> Vec<Crumb> {
+        let Some((s, i)) = self.selection.last().and_then(|k| self.locate(k)) else { return Vec::new() };
+        s.ancestors(i)
+            .into_iter()
+            .map(|a| {
+                let n = &s.nodes[a as usize];
+                Crumb { key: n.key().to_string(), label: n.name.as_deref().unwrap_or(&n.id).to_string() }
+            })
+            .collect()
+    }
+
+    /// The built-in controls, laid out for the canvas (CSS px).
+    fn controls(&self) -> render::controls::Layout {
+        let show = Show { zoom: self.show.zoom && self.doc.is_some(), ..self.show };
+        render::controls::layout(show, self.size, &self.crumbs(), self.cam.zoom, &self.ui)
+    }
+
+    /// Acts on a built-in control; returns what it was, for the page.
+    fn press(&mut self, c: Control) -> Value {
+        let (w, h) = self.size;
+        match c {
+            Control::Crumb(i) => {
+                if let Some(k) = self.crumbs().get(i) {
+                    self.selection = vec![k.key.clone()];
+                }
+                json!({"control": "breadcrumb"})
+            }
+            Control::ZoomOut => {
+                self.zoom_at(1.0 / render::controls::ZOOM_STEP, w / 2.0, h / 2.0);
+                json!({"control": "zoom"})
+            }
+            Control::ZoomIn => {
+                self.zoom_at(render::controls::ZOOM_STEP, w / 2.0, h / 2.0);
+                json!({"control": "zoom"})
+            }
+            Control::ZoomLevel => {
+                self.fit(None);
+                json!({"control": "zoom"})
+            }
+            Control::Light | Control::Dark => {
+                self.dark = c == Control::Dark;
+                json!({"control": "theme", "dark": self.dark})
+            }
+        }
+    }
+
     /// Nodes an agent read: a scan line sweeps each, staggered.
     fn scan(&mut self, mut keys: Vec<String>) {
         let view = self.viewport();
@@ -464,6 +517,7 @@ impl Viewer {
             })
             .collect();
         let clock = now.duration_since(self.started).as_secs_f32();
+        let controls = self.controls();
 
         let viewport = self.viewport();
         let canvas = self.surface.canvas();
@@ -519,6 +573,7 @@ impl Viewer {
                 draw_nib(canvas, p.x / self.dpr, p.y / self.dpr);
             }
         }
+        controls.draw(canvas, self.dark, self.ctrl_hover, &self.ui);
         canvas.restore();
         if let Err(e) = self.gr.flush_and_submit_surface(&mut self.surface, None) {
             eprintln!("study: frame not submitted: {e}");
@@ -840,10 +895,48 @@ pub extern "C" fn study_set_fallback_fonts(v: *mut Viewer, ptr: *const u8, len: 
 pub extern "C" fn study_pointer(v: *mut Viewer, x: f32, y: f32, track_hover: bool) -> bool {
     let v = viewer(v);
     v.renderer.mouse = Some(Point::new(x * v.dpr, y * v.dpr));
-    let hover = if track_hover { v.hit(x, y) } else { None };
+    let controls = v.controls();
+    v.ctrl_hover = controls.hit(x, y);
+    let hover = if track_hover && !controls.covers(x, y) { v.hit(x, y) } else { None };
     let changed = hover != v.hover;
     v.hover = hover;
     changed
+}
+
+/// Which built-in controls to draw: the breadcrumb, the zoom buttons, the light/dark switch.
+#[unsafe(no_mangle)]
+pub extern "C" fn study_set_controls(v: *mut Viewer, breadcrumb: bool, zoom: bool, theme: bool) {
+    viewer(v).show = Show { breadcrumb, zoom, theme };
+}
+
+/// Whether a point (CSS px) is on a built-in control's panel; the canvas ignores it there.
+#[unsafe(no_mangle)]
+pub extern "C" fn study_on_controls(v: *mut Viewer, x: f32, y: f32) -> bool {
+    viewer(v).controls().covers(x, y)
+}
+
+/// Whether the pointer is over a clickable control (for the cursor).
+#[unsafe(no_mangle)]
+pub extern "C" fn study_over_control(v: *mut Viewer) -> bool {
+    viewer(v).ctrl_hover.is_some()
+}
+
+/// A click at (x, y) CSS px on a built-in control: acts on it and returns JSON saying which kind
+/// (`{"control": "breadcrumb" | "zoom" | "theme", "dark"?}`), or null if there's none there.
+#[unsafe(no_mangle)]
+pub extern "C" fn study_press(v: *mut Viewer, x: f32, y: f32) -> *const c_char {
+    let v = viewer(v);
+    let Some(c) = v.controls().hit(x, y) else { return std::ptr::null() };
+    let what = v.press(c).to_string();
+    give(v, Some(what))
+}
+
+/// The breadcrumb: the last selected node and its ancestors, top-level frame first (JSON ids).
+#[unsafe(no_mangle)]
+pub extern "C" fn study_breadcrumb(v: *mut Viewer) -> *const c_char {
+    let v = viewer(v);
+    let ids: Vec<String> = v.crumbs().into_iter().map(|c| c.key).collect();
+    give(v, serde_json::to_string(&ids).ok())
 }
 
 #[unsafe(no_mangle)]
