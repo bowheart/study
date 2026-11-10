@@ -77,24 +77,33 @@
   }
   viewer.addEventListener("themechange", (e) => ($("theme").value = e.detail.theme));
 
-  // A toolbar that follows the selection, and the context an "Ask AI" button would send.
+  // A toolbar over the selection (Shift+click adds nodes), and the context an "Ask AI" button
+  // would send: every selected node.
   function placeToolbar() {
-    const [node] = viewer.selection;
-    $("toolbar").style.display = node ? "flex" : "none";
-    if (!node) return;
-    $("picked").textContent = `${node.name ?? node.id} · ${node.type}`;
-    $("toolbar").style.left = `${node.screen.x + node.screen.width / 2}px`;
-    $("toolbar").style.top = `${Math.max(48, node.screen.y)}px`;
+    const nodes = viewer.selection.filter((n) => n.screen);
+    $("toolbar").style.display = nodes.length ? "flex" : "none";
+    if (!nodes.length) return;
+    const [only] = nodes;
+    $("picked").textContent = nodes.length === 1 ? `${only.name ?? only.id} · ${only.type}` : `${nodes.length} nodes`;
+    // Centred over all of them.
+    const left = Math.min(...nodes.map((n) => n.screen.x));
+    const right = Math.max(...nodes.map((n) => n.screen.x + n.screen.width));
+    const top = Math.min(...nodes.map((n) => n.screen.y));
+    $("toolbar").style.left = `${(left + right) / 2}px`;
+    // Not over the built-in breadcrumb at the top.
+    $("toolbar").style.top = `${Math.max(96, top)}px`;
   }
   viewer.addEventListener("select", placeToolbar);
   viewer.addEventListener("viewchange", placeToolbar);
   $("ask").onclick = () => {
-    const [node] = viewer.selection;
-    const context = { file: path, node, json: viewer.nodeJson(node.id) };
-    const png = viewer.snapshot(node.id);
+    const nodes = viewer.selection;
+    const context = { file: path, nodes: nodes.map((node) => ({ node, json: viewer.nodeJson(node.id) })) };
     $("context").style.display = "block";
     $("context").innerHTML = "";
-    if (png) $("context").append(Object.assign(document.createElement("img"), { src: URL.createObjectURL(png) }));
+    for (const node of nodes) {
+      const png = viewer.snapshot(node.id);
+      if (png) $("context").append(Object.assign(document.createElement("img"), { src: URL.createObjectURL(png), title: node.name ?? node.id }));
+    }
     $("context").append(JSON.stringify(context, null, 2));
   };
 </script>

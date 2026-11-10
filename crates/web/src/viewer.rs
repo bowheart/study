@@ -549,8 +549,8 @@ impl Viewer {
         let (w, h) = self.size;
         match c {
             Control::Crumb(i) => {
-                if let Some(k) = self.crumbs().get(i) {
-                    self.selection = vec![k.key.clone()];
+                if let Some(k) = self.crumbs().into_iter().nth(i) {
+                    render::controls::select_crumb(&mut self.selection, k.key);
                 }
                 json!({"control": "breadcrumb"})
             }

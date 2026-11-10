@@ -92,7 +92,7 @@ viewer.setControls({ breadcrumb: false, zoom: false });
 
 | Built-in control | Do it yourself with |
 | --- | --- |
-| Breadcrumb | `viewer.breadcrumb` (`NodeInfo[]`, top-level frame first) on `select`, then `viewer.select([node.id])` |
+| Breadcrumb | `viewer.breadcrumb` (`NodeInfo[]`, top-level frame first) on `select`. Like the built-in one, swap only the last selected node for the clicked one: `viewer.select([...ids.slice(0, -1).filter((id) => id !== node.id), node.id], node)`, where `ids` is `viewer.selection.map((n) => n.id)` |
 | Zoom | `viewer.zoom` on `viewchange`; `viewer.zoomBy(1.25)`, `viewer.zoomBy(0.8)`, `viewer.fit()` |
 | Theme | `viewer.setTheme("light" \| "dark" \| "system")`, `viewer.theme` |
 
@@ -159,16 +159,20 @@ Agents edit through study's `pencil` MCP tools, which address nodes by `id`. A n
 the `.pen` file's path is all an agent needs. It reads the rest with `Get(id)`. There are two
 ways to pass that along, and they work well together:
 
-1. **In the message.** Send the selection with the user's question, for example:
+1. **In the message.** Send the selection with the user's question. It can hold several nodes
+   (Shift+click adds to it), so send all of them, for example:
 
    ```js
-   const [node] = viewer.selection;
+   const nodes = viewer.selection;
    const context = {
      file: "/srv/specs/home.pen",       // the path the agent's MCP server opens
-     node,                              // id, name, type, place in the tree
-     json: viewer.nodeJson(node.id),    // what the node contains
+     nodes: nodes.map((node) => ({
+       node,                            // id, name, type, place in the tree
+       json: viewer.nodeJson(node.id),  // what the node contains
+     })),
    };
-   const image = viewer.snapshot(node.id); // optional: what it looks like (PNG Blob)
+   // Optional: what they look like (PNG Blobs).
+   const images = nodes.map((node) => viewer.snapshot(node.id));
    ```
 
 2. **As the app's state.** When the agents' MCP server runs with

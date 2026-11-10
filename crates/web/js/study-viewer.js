@@ -418,7 +418,8 @@ export class Viewer extends EventTarget {
 
   /**
    * The last selected node and its ancestors, top-level frame first: what the built-in
-   * breadcrumb shows. Select one with `select([node.id])`. @returns {NodeInfo[]}
+   * breadcrumb shows. A click on the built-in one replaces only the last selected node, keeping
+   * the rest of the selection. @returns {NodeInfo[]}
    */
   get breadcrumb() {
     return (this.#json(this.#m._study_breadcrumb(this.#v)) ?? []).map((id) => this.node(id)).filter(Boolean);

@@ -149,7 +149,7 @@ On macOS use Cmd wherever the table says Ctrl.
 | Wheel / Shift + wheel | Scroll vertically / horizontally |
 | Ctrl + wheel (or pinch) | Zoom at the cursor |
 | Ctrl+0 / Ctrl+1 / Ctrl+2 | Fit everything / 100% / zoom to selection |
-| Breadcrumb (top left) | Click any ancestor of the selection to select it |
+| Breadcrumb (top left) | Click an ancestor of the last selected node to select it instead (the rest of the selection stays) |
 | − / % / + (bottom right) | Zoom out / fit everything / zoom in |
 | Click, Shift+click | Select (Claude sees your selection) |
 | Shift+Enter / Enter | Select parent / first child |

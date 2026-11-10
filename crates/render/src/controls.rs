@@ -13,6 +13,15 @@ pub struct Crumb {
     pub label: String,
 }
 
+/// A breadcrumb click: the crumb takes the place of the last selected node (the one the
+/// breadcrumb shows), and the rest of the selection stays. It stays last, so the breadcrumb keeps
+/// showing it, and isn't listed twice.
+pub fn select_crumb(selection: &mut Vec<String>, key: String) {
+    selection.pop();
+    selection.retain(|k| *k != key);
+    selection.push(key);
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Control {
     /// Index into the crumbs.
@@ -318,4 +327,19 @@ fn ellipsize(font: &dyn Label, s: &str, max: f32) -> String {
         out.pop();
     }
     format!("{out}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_crumb;
+
+    #[test]
+    fn a_crumb_replaces_only_the_last_selected_node() {
+        let mut sel = vec!["a".to_string(), "b".to_string(), "kid".to_string()];
+        select_crumb(&mut sel, "parent".into());
+        assert_eq!(sel, ["a", "b", "parent"]);
+        // Already selected: moves to the end instead of appearing twice.
+        select_crumb(&mut sel, "a".into());
+        assert_eq!(sel, ["b", "a"]);
+    }
 }

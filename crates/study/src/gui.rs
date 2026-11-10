@@ -438,7 +438,7 @@ impl App {
             Control::Crumb(i) => {
                 let key = self.crumbs().get(i).map(|c| c.key.clone());
                 if let (Some(e), Some(key)) = (self.engine.as_mut(), key) {
-                    e.selection = vec![key];
+                    render::controls::select_crumb(&mut e.selection, key);
                 }
                 self.redraw();
             }
