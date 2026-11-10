@@ -97,6 +97,9 @@ viewer.setControls({ breadcrumb: false, zoom: false });
 | Theme | `viewer.setTheme("light" \| "dark" \| "system")`, `viewer.theme` |
 
 ## Selection, clicks and a toolbar
+Clicking selects the deepest node under the pointer, Shift+click adds to the selection, and a
+click on a top-level frame's title (drawn above it) selects the whole frame.
+
 
 Every node is described by a `NodeInfo`:
 

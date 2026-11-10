@@ -10,6 +10,45 @@ pub trait Label {
     fn draw(&self, canvas: &Canvas, s: &str, at: (f32, f32), paint: &Paint);
 }
 
+/// A top-level frame's title above its top-left corner, in screen space (CSS px).
+pub struct Title {
+    /// The frame's id.
+    pub key: String,
+    /// The name as shown (ellipsized to the frame's width).
+    pub text: String,
+    /// Its baseline.
+    pub at: (f32, f32),
+    /// Where a click selects the frame.
+    pub hit: skia_safe::Rect,
+}
+
+/// Titles of the frames on screen, from each frame's id, name and on-screen top-left and width.
+/// Frames narrower than 40 px get none. The same boxes are drawn and clicked.
+pub fn frame_titles<'a>(frames: impl IntoIterator<Item = (&'a str, &'a str, f32, f32, f32)>, view: (f32, f32), font: &impl Label) -> Vec<Title> {
+    let (ww, wh) = view;
+    frames
+        .into_iter()
+        .filter(|&(_, _, sx, sy, sw)| !(sw < 40.0 || sy < -4.0 || sy > wh + 20.0 || sx > ww || sx + sw < 0.0))
+        .map(|(key, name, sx, sy, sw)| {
+            let text = ellipsize(font, name, sw);
+            let w = font.measure(&text).max(12.0);
+            Title { key: key.to_string(), at: (sx, sy - 6.0), hit: skia_safe::Rect::from_xywh(sx, sy - 21.0, w, 19.0), text }
+        })
+        .collect()
+}
+
+/// `s`, cut short with an ellipsis to fit `max` px.
+pub fn ellipsize(font: &impl Label, s: &str, max: f32) -> String {
+    if font.measure(s) <= max {
+        return s.to_string();
+    }
+    let mut out = s.to_string();
+    while !out.is_empty() && font.measure(&format!("{out}…")) > max {
+        out.pop();
+    }
+    format!("{out}…")
+}
+
 /// The calligraphy pen that draws new paths in: study's logo nib, tip at (x, y).
 pub fn draw_nib(canvas: &Canvas, x: f32, y: f32) {
     const NIB: &str = "M50 88 C44 76 31 61 31 47 L31 31 C31 25 35 21 41 21 L59 21 C65 21 69 25 69 31 L69 47 C69 61 56 76 50 88 Z \

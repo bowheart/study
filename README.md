@@ -151,7 +151,7 @@ On macOS use Cmd wherever the table says Ctrl.
 | Ctrl+0 / Ctrl+1 / Ctrl+2 | Fit everything / 100% / zoom to selection |
 | Breadcrumb (top left) | Click an ancestor of the last selected node to select it instead (the rest of the selection stays) |
 | − / % / + (bottom right) | Zoom out / fit everything / zoom in |
-| Click, Shift+click | Select (Claude sees your selection) |
+| Click, Shift+click | Select (Claude sees your selection); a frame's title selects the frame |
 | Shift+Enter / Enter | Select parent / first child |
 | Esc | Clear selection |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo Claude's last change |

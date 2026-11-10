@@ -835,10 +835,17 @@ impl App {
         self.redraw();
     }
 
+    /// The frame whose title is at a point (CSS px).
+    fn title_at(&self, x: f32, y: f32) -> Option<String> {
+        let e = self.engine.as_ref()?;
+        frame_titles(e, self.cam, self.size(), &self.ui).into_iter().rev().find(|t| t.hit.contains(skia_safe::Point::new(x, y))).map(|t| t.key)
+    }
+
     fn select_at(&mut self, sx: f32, sy: f32, toggle: bool) {
+        let title = self.title_at(sx, sy);
         let (dx, dy) = self.to_doc(sx, sy);
         let Some(e) = self.engine.as_mut() else { return };
-        let hit = e.hit_test(dx, dy);
+        let hit = title.or_else(|| e.hit_test(dx, dy));
         match (hit, toggle) {
             (Some(k), true) => {
                 if let Some(i) = e.selection.iter().position(|s| *s == k) {
@@ -948,21 +955,8 @@ impl App {
             canvas.restore();
 
             // Overlays in screen space.
-            for &r in &e.doc.roots {
-                let Some(s) = e.scenes.get(&r) else { continue };
-                let Some(n) = s.root() else { continue };
-                if !n.enabled || !matches!(n.kind, pen::scene::Kind::Frame { .. }) {
-                    continue;
-                }
-                let sx = (n.rect.x - cam.x) * cam.zoom;
-                let sy = (n.rect.y - cam.y) * cam.zoom;
-                let sw = n.rect.w * cam.zoom;
-                if sw < 40.0 || sy < -4.0 || sy > wh + 20.0 || sx > ww || sx + sw < 0.0 {
-                    continue;
-                }
-                let name = n.name.as_deref().unwrap_or(&n.id);
-                let text = ellipsize(&self.ui, name, sw);
-                self.ui.draw(canvas, &text, (sx, sy - 6.0), &label);
+            for t in frame_titles(e, cam, (ww, wh), &self.ui) {
+                self.ui.draw(canvas, &t.text, t.at, &label);
             }
             let outline = |key: &str, color: Color4f, width: f32, with_label: bool| {
                 let Some((m, w, h)) = e.node_transform(key) else { return };
@@ -1031,15 +1025,14 @@ impl App {
     }
 }
 
-fn ellipsize(font: &crate::uitext::UiText, s: &str, max: f32) -> String {
-    if font.measure(s) <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.to_string();
-    while !out.is_empty() && font.measure(&format!("{out}…")) > max {
-        out.pop();
-    }
-    format!("{out}…")
+/// Top-level frames' titles on screen; clicking one selects its frame.
+fn frame_titles(e: &Engine, cam: Camera, size: (f32, f32), ui: &crate::uitext::UiText) -> Vec<render::overlay::Title> {
+    let frames = e.doc.roots.iter().filter_map(|r| {
+        let n = e.scenes.get(r)?.root()?;
+        let frame = n.enabled && matches!(n.kind, pen::scene::Kind::Frame { .. });
+        frame.then(|| (n.key(), n.name.as_deref().unwrap_or(&n.id), (n.rect.x - cam.x) * cam.zoom, (n.rect.y - cam.y) * cam.zoom, n.rect.w * cam.zoom))
+    });
+    render::overlay::frame_titles(frames, size, ui)
 }
 
 /// The "update ready" banner: a dark card with a title, a line of text and two buttons.
@@ -1220,7 +1213,7 @@ impl ApplicationHandler<UserEvent> for App {
                         self.redraw();
                     }
                     let blocked = over_banner.is_some_and(|(p, _)| p) || controls.covers(x, y);
-                    let h = if blocked { None } else { self.engine.as_ref().and_then(|e| e.hit_test(dx, dy)) };
+                    let h = if blocked { None } else { self.title_at(x, y).or_else(|| self.engine.as_ref().and_then(|e| e.hit_test(dx, dy))) };
                     if h != self.hover {
                         self.hover = h;
                         self.redraw();

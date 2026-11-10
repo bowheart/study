@@ -21,7 +21,7 @@ use render::overlay::{draw_nib, draw_scan, draw_working, Label};
 use render::{Renderer, View};
 use serde_json::{json, Map, Value};
 use skia_safe::gpu::{self, gl::FramebufferInfo, DirectContext};
-use skia_safe::{Canvas, Color, Color4f, Font, FontStyle, Paint, PaintStyle, PathBuilder, Point, Surface};
+use skia_safe::{Canvas, Color, Color4f, Contains, Font, FontStyle, Paint, PaintStyle, PathBuilder, Point, Surface};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::{c_char, c_void, CString};
 use std::path::{Path, PathBuf};
@@ -423,10 +423,26 @@ impl Viewer {
         Some(Rect::new(l, t, r - l, b - t))
     }
 
+    /// Top-level frames' titles on screen (none in the changes layout: the page labels rows).
+    fn titles(&self) -> Vec<render::overlay::Title> {
+        let (Some(main), None) = (&self.main, &self.changes) else { return Vec::new() };
+        let cam = self.cam;
+        let frames = main.ordered().into_iter().filter_map(|s| {
+            let n = s.root()?;
+            let frame = n.enabled && matches!(n.kind, Kind::Frame { .. });
+            frame.then(|| (n.key(), n.name.as_deref().unwrap_or(&n.id), (n.rect.x - cam.x) * cam.zoom, (n.rect.y - cam.y) * cam.zoom, n.rect.w * cam.zoom))
+        });
+        render::overlay::frame_titles(frames, self.size, &self.ui)
+    }
+
     /// Deepest selectable node under a point in CSS pixels, and which version it's in.
     fn hit(&self, sx: f32, sy: f32) -> Option<(String, Side)> {
         if self.changes.is_some() {
             return self.hit_rows(sx, sy);
+        }
+        // A frame's title selects the frame.
+        if let Some(t) = self.titles().into_iter().rev().find(|t| t.hit.contains(skia_safe::Point::new(sx, sy))) {
+            return Some((t.key, Side::After));
         }
         let main = self.main.as_ref()?;
         let (x, y) = (self.cam.x + sx / self.cam.zoom, self.cam.y + sy / self.cam.zoom);
@@ -658,7 +674,6 @@ impl Viewer {
         }
         let now = Instant::now();
         let cam = self.cam;
-        let (ww, wh) = self.size;
         let sk = |r: Rect| skia_safe::Rect::from_xywh(r.x, r.y, r.w, r.h);
 
         self.anims.retain(|(_, s, d)| now < *s + Duration::from_secs_f32(*d));
@@ -706,6 +721,7 @@ impl Viewer {
         highlights.extend(self.highlights.iter().map(|h| (h.color, h.keys.iter().filter_map(|k| self.screen_corners(Side::After, k)).collect::<Vec<_>>())));
         let clock = now.duration_since(self.started).as_secs_f32();
         let controls = self.controls();
+        let titles = self.titles();
 
         let viewport = self.viewport();
         let canvas = self.surface.canvas();
@@ -758,18 +774,8 @@ impl Viewer {
             }
 
             let label = Paint::new(if self.dark { Color4f::new(0.74, 0.74, 0.77, 1.0) } else { Color4f::new(0.42, 0.42, 0.45, 1.0) }, None);
-            // Frame titles (the changes layout's rows get theirs from the page).
-            for s in main.ordered().into_iter().filter(|_| self.changes.is_none()) {
-                let Some(n) = s.root() else { continue };
-                if !n.enabled || !matches!(n.kind, Kind::Frame { .. }) {
-                    continue;
-                }
-                let (sx, sy, sw) = ((n.rect.x - cam.x) * cam.zoom, (n.rect.y - cam.y) * cam.zoom, n.rect.w * cam.zoom);
-                if sw < 40.0 || sy < -4.0 || sy > wh + 20.0 || sx > ww || sx + sw < 0.0 {
-                    continue;
-                }
-                let text = ellipsize(&self.ui, n.name.as_deref().unwrap_or(&n.id), sw);
-                self.ui.draw(canvas, &text, (sx, sy - 6.0), &label);
+            for t in &titles {
+                self.ui.draw(canvas, &t.text, t.at, &label);
             }
             if let Some(q) = hover {
                 draw_quad(canvas, &q, Color4f::new(0.10, 0.55, 1.0, 0.55), 1.0);
@@ -866,17 +872,6 @@ fn make_surface(gr: &mut DirectContext, fb: FramebufferInfo, w: i32, h: i32) -> 
     let target = gpu::backend_render_targets::make_gl((w.max(1), h.max(1)), 0, 8, fb);
     gpu::surfaces::wrap_backend_render_target(gr, &target, gpu::SurfaceOrigin::BottomLeft, skia_safe::ColorType::RGBA8888, None, None)
         .expect("Skia surface")
-}
-
-fn ellipsize(font: &UiFont, s: &str, max: f32) -> String {
-    if font.measure(s) <= max {
-        return s.to_string();
-    }
-    let mut out = s.to_string();
-    while !out.is_empty() && font.measure(&format!("{out}…")) > max {
-        out.pop();
-    }
-    format!("{out}…")
 }
 
 /// A page path without `.`/`..` segments, or `None` if it climbs above the root.
