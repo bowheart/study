@@ -51,7 +51,7 @@ folder to your PATH. The exe is unsigned, so Windows SmartScreen asks once befor
 
 For servers, `study-linux-x64.tar.gz` and `study-linux-arm64.tar.gz` from the
 [latest release](https://github.com/bowheart/study/releases/latest) are the MCP server alone
-(`study mcp`), without the window. They need fontconfig and glibc 2.35+. Settings that confine
+(`study mcp`), without the window. They need fontconfig and glibc 2.39+ (Ubuntu 24.04, Debian 13). Settings that confine
 agents to a workspace (`STUDY_ROOT`, `STUDY_WRITABLE`, `STUDY_FETCH_HOSTS`, `STUDY_DATA_DIR`) are
 in [crates/web/README.md](crates/web/README.md#limiting-what-agents-can-touch).
 

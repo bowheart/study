@@ -223,8 +223,9 @@ scanner that skips dotfiles never sees a half-written file.
 
 ### On a Linux server
 
-Releases include `study-linux-x64.tar.gz` and `study-linux-arm64.tar.gz`, built on Ubuntu 22.04,
-so they run on glibc 2.35 or newer (Debian 12, Ubuntu 22.04 and later). Each is the MCP server
+Releases include `study-linux-x64.tar.gz` and `study-linux-arm64.tar.gz`, built on Ubuntu 24.04,
+so they need glibc 2.39 or newer (Ubuntu 24.04, Debian 13 and later; the Skia library study
+uses ships binaries that need it). For Docker, base the image on `ubuntu:24.04` or `debian:trixie`. Each is the MCP server
 alone, with no window, menus or updater. It never opens windows, so it doesn't need
 `STUDY_HEADLESS`.
 

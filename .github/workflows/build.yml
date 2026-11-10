@@ -84,23 +84,31 @@ jobs:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
 
-  # The headless MCP server for Linux hosts. Built on Ubuntu 22.04 so it runs on glibc 2.35+
-  # (Debian 12, Ubuntu 22.04 and newer).
+  # The headless MCP server for Linux hosts. Skia's prebuilt binaries need glibc 2.38+, so it's built
+  # on Ubuntu 24.04 and runs on glibc 2.39+ (Ubuntu 24.04, Debian 13). There are no prebuilt Skia
+  # binaries for Linux arm64, so that job builds Skia from source (slow until the cache is warm).
   linux:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
+          - os: ubuntu-24.04
             asset: study-linux-x64.tar.gz
-          - os: ubuntu-22.04-arm
+          - os: ubuntu-24.04-arm
             asset: study-linux-arm64.tar.gz
+            skia-from-source: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      - name: Set up a Skia source build
+        if: matrix.skia-from-source
+        run: |
+          sudo apt-get install -y clang ninja-build python3
+          # zlib's ARM CRC32 code needs the CRC extension spelled out.
+          echo 'SKIA_GN_ARGS=extra_cflags_c=["-march=armv8-a+crc"]' >> "$GITHUB_ENV"
       - run: cargo test -p pen -p render && cargo test -p study --no-default-features
       - run: cargo build --release -p study --no-default-features
       - name: Smoke test
