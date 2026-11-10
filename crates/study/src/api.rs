@@ -133,6 +133,16 @@ pub fn execute(engine: &mut Engine, input: Option<String>, edit_id: Option<Strin
     HOST.with(|h| h.set(std::ptr::null_mut()));
     let mut st = STATE.with(|s| std::mem::take(&mut *s.borrow_mut()));
 
+    // A snippet may change a read-only document only if it changes nothing.
+    let outcome = match (outcome, &engine.read_only) {
+        (Ok(()), Some(why)) if engine.doc.has_pending_changes() => {
+            st.exports.clear();
+            st.screenshots.clear();
+            Err(why.clone())
+        }
+        (o, _) => o,
+    };
+
     match outcome {
         Err(msg) => {
             engine.doc.rollback();

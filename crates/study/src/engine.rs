@@ -10,7 +10,7 @@ use pen::vars::Vars;
 use pen::{Document, NodeId};
 use render::Renderer;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 pub struct Engine {
@@ -41,6 +41,26 @@ pub struct Engine {
     scripts: Option<crate::scripts::Scripts>,
     /// Script failures since the last execute call reported them.
     pub script_errors: Vec<String>,
+    /// Why the document can't be changed (outside `STUDY_WRITABLE`), if it can't.
+    pub read_only: Option<String>,
+    /// Set when `open` created the file, until a host is told (`STUDY_EVENTS`).
+    pub created: bool,
+    /// Size and SHA-256 of the last save, until a host is told.
+    pub saved: Option<Saved>,
+}
+
+/// What a save wrote, so a host can check it loads the same bytes.
+pub struct Saved {
+    pub size: u64,
+    pub sha256: String,
+}
+
+impl Saved {
+    fn of(text: &str) -> Saved {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(text.as_bytes());
+        Saved { size: text.len() as u64, sha256: hash.iter().map(|b| format!("{b:02x}")).collect() }
+    }
 }
 
 impl Engine {
@@ -50,8 +70,12 @@ impl Engine {
             renderer.base_dir = dir.to_path_buf();
         }
         let disk_mtime = doc.path.as_ref().and_then(|p| mtime(p));
+        let read_only = doc.path.as_deref().and_then(pen::access::read_only_reason);
         let imports = Imports::load(&doc);
         let mut e = Engine {
+            read_only,
+            created: false,
+            saved: None,
             vars: vars_for(&doc, &imports),
             doc,
             scenes: HashMap::new(),
@@ -77,18 +101,19 @@ impl Engine {
     }
 
     pub fn open(path: &Path) -> Result<Engine> {
-        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let path = PathBuf::from(path.to_string_lossy().trim_start_matches(r"\\?\"));
-        let doc = if path.exists() {
-            Document::load(&path)?
-        } else {
-            let mut d = Document::default();
-            d.path = Some(path.clone());
-            d.format.trailing_newline = false;
-            d.save()?;
-            d
-        };
-        Ok(Engine::new(doc))
+        pen::access::check_read(path).map_err(|e| anyhow::anyhow!(e))?;
+        let path = pen::access::resolve(path).unwrap_or_else(|_| path.to_path_buf());
+        if path.exists() {
+            return Ok(Engine::new(Document::load(&path)?));
+        }
+        let mut d = Document::default();
+        d.path = Some(path.clone());
+        d.format.trailing_newline = false;
+        let text = d.save()?;
+        let mut e = Engine::new(d);
+        e.created = true;
+        e.saved = Some(Saved::of(&text));
+        Ok(e)
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -215,14 +240,20 @@ impl Engine {
         if self.doc.path.is_none() {
             return Ok(());
         }
-        self.doc.save()?;
+        if let Some(why) = &self.read_only {
+            return Err(anyhow::anyhow!("{why}"));
+        }
+        let text = self.doc.save()?;
+        self.saved = Some(Saved::of(&text));
         self.disk_mtime = self.path().and_then(mtime);
         Ok(())
     }
 
     /// Writes the document to a new path and continues editing it there.
     pub fn save_as(&mut self, path: &Path) -> Result<()> {
-        self.doc.save_as(path)?;
+        let text = self.doc.save_as(path)?;
+        self.saved = Some(Saved::of(&text));
+        self.read_only = None;
         if let Some(dir) = path.parent() {
             self.renderer.base_dir = dir.to_path_buf();
         }

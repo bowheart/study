@@ -10,6 +10,7 @@ pub fn export(engine: &mut Engine, ids: &[String], format: &str, output: &str, o
     let base = engine.path().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
     let out = if Path::new(output).is_absolute() { PathBuf::from(output) } else { base.join(output.trim_start_matches("./").trim_start_matches(".\\")) };
     let out: PathBuf = out.components().collect();
+    pen::access::check_write(&out).map_err(|e| anyhow!(e))?;
     let scale = opts.get("scale").and_then(Value::as_f64).unwrap_or(2.0) as f32;
     let quality = opts.get("quality").and_then(Value::as_u64).map(|q| q.clamp(1, 100) as u32);
     match format {
@@ -21,7 +22,7 @@ pub fn export(engine: &mut Engine, ids: &[String], format: &str, output: &str, o
                 let bytes = render(engine, region, scale, format, quality)?;
                 let file = out.join(format!("{}.{}", id.replace('/', "_"), match format { "jpeg" => "jpg", f => f }));
                 std::fs::write(&file, bytes)?;
-                files.push(file.display().to_string());
+                files.push(pen::access::display(&file));
             }
             Ok(files)
         }
@@ -29,7 +30,7 @@ pub fn export(engine: &mut Engine, ids: &[String], format: &str, output: &str, o
             std::fs::create_dir_all(&out)?;
             let file = out.join("export.pdf");
             pdf(engine, ids, &file)?;
-            Ok(vec![file.display().to_string()])
+            Ok(vec![pen::access::display(&file)])
         }
         "html-css" | "html-tailwind" => {
             if let Some(dir) = out.parent() {
@@ -37,7 +38,7 @@ pub fn export(engine: &mut Engine, ids: &[String], format: &str, output: &str, o
             }
             let html = crate::html::export(engine, ids, format == "html-tailwind", opts, out.parent().unwrap_or(&base))?;
             std::fs::write(&out, html)?;
-            Ok(vec![out.display().to_string()])
+            Ok(vec![pen::access::display(&out)])
         }
         _ => Err(anyhow!("unknown format {format}")),
     }

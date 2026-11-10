@@ -29,6 +29,7 @@ impl Scripts {
 
     /// Runs a script for a node of size `w`×`h` with the node's `inputs`.
     pub fn run(&mut self, file: &Path, w: f32, h: f32, inputs: &Map<String, Value>) -> Result<Vec<Value>, String> {
+        pen::access::check_read(file)?;
         let src = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
         let job = pen::script::prepare(&src, w, h, inputs).map_err(|e| format!("{}: {e}", file.display()))?;
         let key = job.key;

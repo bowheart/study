@@ -49,9 +49,11 @@ folder to your PATH. The exe is unsigned, so Windows SmartScreen asks once befor
 
 ### Linux (headless)
 
-For servers, `study-linux-x64.tar.gz` from the [latest release](https://github.com/bowheart/study/releases/latest)
-is the MCP server alone (`study mcp`), without the window. It needs fontconfig. See
-[crates/web/README.md](crates/web/README.md#on-a-linux-server).
+For servers, `study-linux-x64.tar.gz` and `study-linux-arm64.tar.gz` from the
+[latest release](https://github.com/bowheart/study/releases/latest) are the MCP server alone
+(`study mcp`), without the window. They need fontconfig and glibc 2.35+. Settings that confine
+agents to a workspace (`STUDY_ROOT`, `STUDY_WRITABLE`, `STUDY_FETCH_HOSTS`, `STUDY_DATA_DIR`) are
+in [crates/web/README.md](crates/web/README.md#limiting-what-agents-can-touch).
 
 ### Updating
 
@@ -188,7 +190,7 @@ fonts load.
 ## Files
 
 `~/.study` holds downloaded fonts and icon sets, window state (recent files, cameras, theme) and
-your optional `styles/`. Deleting it is safe.
+your optional `styles/`. Deleting it is safe. Set `STUDY_DATA_DIR` to use another directory.
 
 ## Not supported
 

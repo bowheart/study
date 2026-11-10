@@ -84,9 +84,18 @@ jobs:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
 
-  # Headless MCP server for Linux hosts (no window, menus or updater): `study mcp`.
+  # The headless MCP server for Linux hosts. Built on Ubuntu 22.04 so it runs on glibc 2.35+
+  # (Debian 12, Ubuntu 22.04 and newer).
   linux:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            asset: study-linux-x64.tar.gz
+          - os: ubuntu-22.04-arm
+            asset: study-linux-arm64.tar.gz
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -96,15 +105,26 @@ jobs:
       - run: cargo build --release -p study --no-default-features
       - name: Smoke test
         run: |
-          printf '%s\n' \
-            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
-            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"execute","arguments":{"filePath":"'"$PWD"'/examples/showcase.pen","input":"Print(Get(\"ZcurH\").name)"}}}' \
-            | target/release/study mcp | tee /dev/stderr | grep -q "Tidepool"
-      - run: tar -czf study-linux-x64.tar.gz -C target/release study
+          call() {
+            printf '%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+              '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"execute","arguments":{"filePath":"'"$1"'","input":"'"$2"'"}}}' \
+              | target/release/study mcp | tee /dev/stderr
+          }
+          call "$PWD/examples/showcase.pen" 'Print(Get(\"ZcurH\").name)' | grep "Tidepool" > /dev/null
+          # Write confinement: the example is read-only, a new file in the writable directory isn't.
+          mkdir -p /tmp/ws/deliverables && cp examples/showcase.pen /tmp/ws/home.pen
+          export STUDY_ROOT=/tmp/ws STUDY_WRITABLE=/tmp/ws/deliverables STUDY_EVENTS=/tmp/ws/events.jsonl
+          call /tmp/ws/home.pen 'Update(\"ZcurH\", {name: \"x\"})' | grep "home.pen is read-only" > /dev/null
+          cmp examples/showcase.pen /tmp/ws/home.pen
+          call /tmp/ws/../etc/passwd 'Print(1)' | grep "outside the workspace" > /dev/null
+          call /tmp/ws/deliverables/new.pen 'Insert(document, {type: \"frame\", width: 10, height: 10})'
+          grep '"created":true' /tmp/ws/events.jsonl | grep -q '"file":"deliverables/new.pen"'
+      - run: tar -czf ${{ matrix.asset }} -C target/release study
       - uses: actions/upload-artifact@v4
         with:
-          name: study-linux-x64.tar.gz
-          path: study-linux-x64.tar.gz
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
 
   # The browser viewer (crates/web): study-viewer.js + study-web.js + study_web.wasm.
   web:

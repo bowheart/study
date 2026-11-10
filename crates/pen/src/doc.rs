@@ -110,6 +110,7 @@ impl Default for Document {
 
 impl Document {
     pub fn load(path: &Path) -> Result<Document> {
+        crate::access::check_read(path).map_err(|e| anyhow!(e))?;
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut doc = Document::parse(&text).with_context(|| format!("parsing {}", path.display()))?;
         doc.path = Some(path.to_path_buf());
@@ -296,18 +297,32 @@ impl Document {
         w.end_array(node.children.is_empty());
     }
 
-    pub fn save(&mut self) -> Result<()> {
+    /// Writes the document to its path. Returns the text written.
+    pub fn save(&mut self) -> Result<String> {
         let path = self.path.clone().ok_or_else(|| anyhow!("document has no path"))?;
         self.save_as(&path)
     }
 
-    pub fn save_as(&mut self, path: &Path) -> Result<()> {
+    /// Writes the document to `path` and continues with it there. Returns the text written.
+    /// The text goes to a hidden `.<name>.tmp` beside it first, then is renamed into place, so
+    /// readers never see half a file and directory scanners that skip dotfiles skip the temp.
+    pub fn save_as(&mut self, path: &Path) -> Result<String> {
+        crate::access::check_write(path).map_err(|e| anyhow!(e))?;
         let text = self.serialize();
-        let tmp = path.with_extension("pen.tmp");
+        let name = path.file_name().ok_or_else(|| anyhow!("{} is not a file path", path.display()))?;
+        let tmp = path.with_file_name(format!(".{}.tmp", name.to_string_lossy()));
         std::fs::write(&tmp, text.as_bytes())?;
-        std::fs::rename(&tmp, path)?;
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         self.path = Some(path.to_path_buf());
-        Ok(())
+        Ok(text)
+    }
+
+    /// Whether the open transaction (`begin`) has recorded any change yet.
+    pub fn has_pending_changes(&self) -> bool {
+        self.journal.as_ref().is_some_and(|j| !j.is_empty())
     }
 
     // ---------------------------------------------------------------- transactions

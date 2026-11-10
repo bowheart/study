@@ -70,7 +70,8 @@ pub struct Shaders {
 impl Shaders {
     pub fn shader(&mut self, path: PathBuf, user: &[(String, Uniform)], ctx: Ctx) -> Option<Built> {
         if !self.cache.contains_key(&path) {
-            let compiled = match std::fs::read_to_string(&path) {
+            let read = pen::access::check_read(&path).and_then(|_| std::fs::read_to_string(&path).map_err(|e| e.to_string()));
+            let compiled = match read {
                 Ok(src) => match compile(&src) {
                     Ok(c) => Some(c),
                     Err(e) => {

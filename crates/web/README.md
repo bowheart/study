@@ -184,28 +184,48 @@ Run the agents' MCP server headless, logging what each call did:
 STUDY_HEADLESS=1 STUDY_EVENTS=/srv/specs/events.jsonl STUDY_SELECTION=/srv/specs/view.json study mcp
 ```
 
-Each `execute` call saves the `.pen` file and appends a line to the events file:
+Each `execute` call that reads, changes or creates something appends a line to the events file:
 
 ```json
-{"file": "/srv/specs/home.pen", "time": 1794241048796, "read": ["ZcurH"], "edited": ["ZcurH"], "drawn": ["HYOgq"]}
+{"file": "deliverables/home.pen", "time": 1794241048796, "read": ["ZcurH"], "edited": ["ZcurH"], "drawn": ["HYOgq"], "size": 48213, "sha256": "9f2c…"}
 ```
 
-Push the saved file and the event to the page, over your WebSocket or server-sent events. Load
-the file first, then replay the event:
+| Field | |
+| --- | --- |
+| `file` | Relative to `STUDY_ROOT` when that's set (with `/`), otherwise the `filePath` the agent passed |
+| `read` | Nodes the call read: give them a scan sweep |
+| `edited` | Top-level frames it changed: they glow |
+| `drawn` | Path nodes it created: the pen draws them in |
+| `size`, `sha256` | Present when the call saved the file: the exact bytes it wrote |
+| `created` | `true` when the call created the file |
+
+Calls that only read have no `size` or `sha256`, since the file didn't change. Push the saved file
+and the event to the page, over your WebSocket or server-sent events. Load the file first, then
+replay the event. When two saves land close together, the hash tells you whether the bytes you
+loaded are the ones the event describes:
 
 ```js
-await viewer.load(newPenText, { path: "specs/home.pen" });
-viewer.working(event.edited); // top-level frames glow ("Claude is working") for ~20 s
-viewer.drawIn(event.drawn);   // new paths are drawn in by the pen
-viewer.scan(event.read);      // nodes it read get a scan sweep
+const bytes = new Uint8Array(await (await fetch(fileUrl)).arrayBuffer());
+const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+const hex = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+if (!event.sha256 || hex === event.sha256) {
+  await viewer.load(bytes, { path: event.file });
+  viewer.working(event.edited); // top-level frames glow ("Claude is working") for ~20 s
+  viewer.drawIn(event.drawn);   // new paths are drawn in by the pen
+  viewer.scan(event.read);      // nodes it read get a scan sweep
+}
 ```
 
 `load` takes 1 ms for a typical file, 0.7 s for 230K nodes and 3.3 s for 920K.
 
+Saves write a hidden `.<name>.tmp` beside the file and rename it into place, so a directory
+scanner that skips dotfiles never sees a half-written file.
+
 ### On a Linux server
 
-Releases include `study-linux-x64.tar.gz`, built on Ubuntu (glibc). It's the MCP server alone,
-with no window, menus or updater, and it never opens windows, so it doesn't need
+Releases include `study-linux-x64.tar.gz` and `study-linux-arm64.tar.gz`, built on Ubuntu 22.04,
+so they run on glibc 2.35 or newer (Debian 12, Ubuntu 22.04 and later). Each is the MCP server
+alone, with no window, menus or updater. It never opens windows, so it doesn't need
 `STUDY_HEADLESS`.
 
 - **Dependencies:** it needs fontconfig (`apt install libfontconfig1`).
@@ -218,7 +238,43 @@ with no window, menus or updater, and it never opens windows, so it doesn't need
   ```
 
 Point each agent session's MCP config at it as the `pencil` server, with the environment
-variables above.
+variables below.
+
+### Limiting what agents can touch
+
+When agents work on files other people uploaded, give each `study mcp` process these settings.
+All of them are off unless set.
+
+| Variable | Effect |
+| --- | --- |
+| `STUDY_ROOT=<dir>` | Every file study reads or writes must resolve inside `<dir>`, after following symlinks: `filePath`, `imports`, image, shader and `script` sources, and `Export` output. Anything else is refused, and images outside it render blank. |
+| `STUDY_WRITABLE=<dir>[:<dir>...]` | Study saves, creates `.pen` files and exports only inside these directories (separated like `PATH`). Documents elsewhere open read-only. |
+| `STUDY_DATA_DIR=<dir>` | Where downloaded fonts and icon sets are cached, instead of `~/.study`. Point it at a persistent volume. |
+| `STUDY_FETCH_HOSTS=<host>,...` | The only hosts study may contact; `*.example.com` covers subdomains. Each redirect is checked too. An empty value blocks all network access. |
+
+Relative directories are resolved against the process's working directory. For the layout
+`context-files/` (uploads, read-only), `deliverables/` (agent output) and `.study/` (yours), run
+each agent turn in the workspace with:
+
+```bash
+STUDY_ROOT=. STUDY_WRITABLE=deliverables \
+STUDY_EVENTS=.study/events.jsonl STUDY_SELECTION=.study/view.json \
+STUDY_DATA_DIR=/var/cache/study \
+STUDY_FETCH_HOSTS=fonts.googleapis.com,fonts.gstatic.com,registry.npmjs.org \
+study mcp
+```
+
+- **Fonts and icons:** that allowlist covers them. Image URLs in documents then fail, so a
+  document someone uploads can't make the server request other URLs.
+- **Read-only documents:** a snippet that only reads works as usual. One that would change the
+  document fails, leaving the document and file untouched, with an error such as
+  `context-files/home.pen is read-only. Copy it into deliverables/ to edit it.`
+  `get_app_state` says so too.
+- **Creating files:** an `execute` on a path that doesn't exist creates the file only inside a
+  writable directory. Elsewhere it fails with `<path> can't be created there`.
+- **Error messages** name files relative to `STUDY_ROOT`, so agents don't see server paths.
+- **Proxies:** `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` are honored, with or
+  without these settings.
 
 ## Files, imports and scripts
 

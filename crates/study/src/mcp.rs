@@ -140,7 +140,7 @@ impl Server {
                         let engine = self.headless.get_mut(&key).unwrap();
                         engine.reload_if_changed();
                         let result = tools::execute(engine, args);
-                        record_presence(engine);
+                        record_presence(engine, file.as_deref());
                         result
                     }
                     Route::Error(e) => ipc::tool_error(&e),
@@ -204,6 +204,7 @@ impl Server {
                 },
             };
         };
+        let given = file;
         let file = absolute(file);
         let key = ipc::norm(&file);
         if let Some(w) = windows.iter().find(|w| w.file.as_ref().is_some_and(|f| ipc::norm(f) == key)) {
@@ -217,11 +218,11 @@ impl Server {
             }
         }
         if !self.headless.contains_key(&key) {
-            match Engine::open(&file) {
+            match Engine::open(given) {
                 Ok(e) => {
                     self.headless.insert(key.clone(), e);
                 }
-                Err(e) => return Route::Error(format!("Could not open {}: {e:#}", file.display())),
+                Err(e) => return Route::Error(format!("Could not open {}: {e:#}", given.display())),
             }
         }
         Route::Headless(key)
@@ -251,19 +252,32 @@ fn host_view() -> Option<(PathBuf, Vec<String>)> {
 }
 
 /// What a headless execute call did, for a host app to replay in the web viewer (`crates/web`):
-/// with `STUDY_EVENTS=<file>`, one JSON line per call that read or changed something —
+/// with `STUDY_EVENTS=<file>`, one JSON line per call that read, changed or created something —
 /// `{"file", "time", "read", "edited", "drawn"}` (node ids read, top-level frames changed,
-/// path nodes created). Windows show the same thing themselves.
-fn record_presence(engine: &mut Engine) {
+/// path nodes created), plus `size` and `sha256` of the file when the call saved it and
+/// `"created": true` when it created it. `file` is relative to `STUDY_ROOT` when that's set,
+/// otherwise the path the call gave. Windows show the same thing themselves.
+fn record_presence(engine: &mut Engine, given: Option<&Path>) {
     let read = std::mem::take(&mut engine.fresh_reads);
     let edited = std::mem::take(&mut engine.touched_roots);
     let drawn = std::mem::take(&mut engine.fresh_paths);
+    let created = std::mem::take(&mut engine.created);
+    let saved = engine.saved.take();
     let Some(log) = std::env::var_os("STUDY_EVENTS") else { return };
-    if read.is_empty() && edited.is_empty() && drawn.is_empty() {
+    if read.is_empty() && edited.is_empty() && drawn.is_empty() && !created && saved.is_none() {
         return;
     }
     let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-    let line = json!({"file": engine.path(), "time": time, "read": read, "edited": edited, "drawn": drawn});
+    let path = engine.path().unwrap_or(Path::new(""));
+    let file = pen::access::relative(path).unwrap_or_else(|| given.unwrap_or(path).display().to_string());
+    let mut line = json!({"file": file, "time": time, "read": read, "edited": edited, "drawn": drawn});
+    if created {
+        line["created"] = json!(true);
+    }
+    if let Some(s) = saved {
+        line["size"] = json!(s.size);
+        line["sha256"] = json!(s.sha256);
+    }
     let written = std::fs::OpenOptions::new().create(true).append(true).open(&log).and_then(|mut f| writeln!(f, "{line}"));
     if let Err(e) = written {
         eprintln!("study: could not write STUDY_EVENTS ({}): {e}", PathBuf::from(log).display());

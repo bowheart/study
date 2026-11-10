@@ -18,7 +18,8 @@ reproduces it byte-for-byte, and edits change only what they touch.
   serde's default formatting differs on values like `111.12234497070312`. Requires the
   `float_roundtrip` feature.
 - CRLF vs LF and the trailing newline are detected on load and kept (`doc.format`).
-- Saves are atomic (`.pen.tmp` + rename).
+- Saves are atomic: a hidden `.<name>.tmp` beside the file, then a rename. Hidden so directory
+  scanners that skip dotfiles never pick up a half-written file.
 - Edits go through transactions: `begin` → mutations (`insert`, `update` where `null` deletes a
   key, `delete`, `move_node`, `set_header`) → `commit` returns an undo log, or `rollback`.
   `undo(log)` applies a log and returns its inverse (which is the redo log). Deleted nodes stay in
@@ -200,9 +201,19 @@ style (variables and themes applied, instances expanded) plus computed rects and
   (`RootScene::ancestors`) and the camera, draws them last, and checks pointer input against
   them (`study_on_controls`/`study_press`) before the canvas sees it. `Show` turns each one off.
 - **MCP for host apps.** Headless `study mcp` with `STUDY_EVENTS=<file>` appends one JSON line
-  per execute call (`record_presence`). `STUDY_SELECTION=<file>` (`host_view`) names the
-  document and selection the user has in the page, and headless `get_app_state` reports them
-  like a window does.
+  per execute call (`record_presence`). The line carries `size`/`sha256` of the bytes the call
+  saved (`Engine::saved`, from the text `Document::save_as` returns) and `created` (set by
+  `Engine::open`). `STUDY_SELECTION=<file>` (`host_view`) names the document and selection the
+  user has in the page, and headless `get_app_state` reports them like a window does.
+- **Confinement for servers.** `pen::access` reads `STUDY_ROOT` and `STUDY_WRITABLE` once and
+  is called at every file read and write: `Document::load`/`save_as` (documents and imports),
+  `Images::get`, `Shaders::shader`, `Scripts::run`, `Engine::open` and `export`. `resolve`
+  follows symlinks component by component, including for paths that don't exist yet, and fails
+  on broken links, so a link can't point a write outside. A document outside `STUDY_WRITABLE`
+  gets `Engine::read_only`. `execute` rolls a call back if it changed such a document
+  (`Document::has_pending_changes`), and `Engine::save` refuses it. `render::net` checks
+  `STUDY_FETCH_HOSTS` and follows redirects itself so each hop is checked.
+  `render::data_dir` honors `STUDY_DATA_DIR`.
 - **Build environment.** `build.sh` puts the SDK's own Python and Node on `PATH` and links with
   `em++`, because rustc's default `emcc.bat` is gone from newer SDKs.
 

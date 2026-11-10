@@ -39,7 +39,8 @@ impl Images {
             });
             return None;
         }
-        let img = std::fs::read(key).ok().and_then(|b| decode(&b));
+        let readable = pen::access::check_read(std::path::Path::new(key)).is_ok();
+        let img = readable.then(|| std::fs::read(key).ok()).flatten().and_then(|b| decode(&b));
         let out = img.clone();
         self.cache.insert(key.to_string(), img.map(State::Ready).unwrap_or(State::Failed));
         out

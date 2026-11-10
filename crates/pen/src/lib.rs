@@ -1,3 +1,4 @@
+pub mod access;
 pub mod doc;
 pub mod imports;
 pub mod instance;
