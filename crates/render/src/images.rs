@@ -10,16 +10,20 @@ enum State {
     Failed,
 }
 
+type Arrival = (String, crate::net::Reply);
+
 pub struct Images {
     cache: HashMap<String, State>,
-    tx: Sender<(String, Option<Vec<u8>>)>,
-    rx: Receiver<(String, Option<Vec<u8>>)>,
+    tx: Sender<Arrival>,
+    rx: Receiver<Arrival>,
+    /// Images that couldn't be shown since the last `take_failures`: key and why.
+    failures: Vec<(String, String)>,
 }
 
 impl Images {
     pub fn new() -> Images {
         let (tx, rx) = channel();
-        Images { cache: HashMap::new(), tx, rx }
+        Images { cache: HashMap::new(), tx, rx, failures: Vec::new() }
     }
 
     /// `key` is an absolute file path or an http(s) URL.
@@ -35,15 +39,44 @@ impl Images {
             let tx = self.tx.clone();
             let url = key.to_string();
             crate::net::get(url.clone(), 64 << 20, move |reply| {
-                let _ = tx.send((url, reply.ok()));
+                let _ = tx.send((url, reply));
             });
             return None;
         }
-        let readable = pen::access::check_read(std::path::Path::new(key)).is_ok();
-        let img = readable.then(|| std::fs::read(key).ok()).flatten().and_then(|b| decode(&b));
-        let out = img.clone();
-        self.cache.insert(key.to_string(), img.map(State::Ready).unwrap_or(State::Failed));
+        let read = pen::access::check_read(std::path::Path::new(key)).map_err(|e| e.to_string()).and_then(|_| std::fs::read(key).map_err(|_| "not found".to_string()));
+        let img = match read {
+            Ok(bytes) => decode(&bytes).ok_or_else(|| "not an image study can decode".to_string()),
+            Err(e) => Err(e),
+        };
+        self.settle(key.to_string(), img.clone())
+    }
+
+    fn settle(&mut self, key: String, img: Result<Image, String>) -> Option<Image> {
+        let out = img.as_ref().ok().cloned();
+        match img {
+            Ok(i) => {
+                self.cache.insert(key, State::Ready(i));
+            }
+            Err(why) => {
+                self.failures.push((key.clone(), why));
+                self.cache.insert(key, State::Failed);
+            }
+        }
         out
+    }
+
+    fn arrived(&mut self, (url, reply): Arrival) {
+        let img = match reply {
+            Ok(bytes) => decode(&bytes).ok_or_else(|| "not an image study can decode".to_string()),
+            Err(Some(status)) => Err(format!("download failed (HTTP {status})")),
+            Err(None) => Err("download failed (network error)".to_string()),
+        };
+        self.settle(url, img);
+    }
+
+    /// Images that failed to load since the last call: key (path or URL) and the reason.
+    pub fn take_failures(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.failures)
     }
 
     /// Drops a cached image, so a replaced file is read again.
@@ -53,9 +86,8 @@ impl Images {
 
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
-        while let Ok((url, data)) = self.rx.try_recv() {
-            let img = data.and_then(|b| decode(&b));
-            self.cache.insert(url, img.map(State::Ready).unwrap_or(State::Failed));
+        while let Ok(arrival) = self.rx.try_recv() {
+            self.arrived(arrival);
             changed = true;
         }
         changed
@@ -70,10 +102,7 @@ impl Images {
         while self.has_pending() {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             match self.rx.recv_timeout(left) {
-                Ok((url, data)) => {
-                    let img = data.and_then(|b| decode(&b));
-                    self.cache.insert(url, img.map(State::Ready).unwrap_or(State::Failed));
-                }
+                Ok(arrival) => self.arrived(arrival),
                 Err(_) => break,
             }
         }

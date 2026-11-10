@@ -100,6 +100,12 @@ impl Fonts {
         self.web.fallbacks = families;
     }
 
+    /// Fonts that failed to load since the last call, as messages (web build).
+    #[cfg(target_os = "emscripten")]
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.web.warnings)
+    }
+
     fn request_exact(&mut self, family: &str, weight: u16, italic: bool) {
         let key = (family.to_string(), weight, italic);
         if self.state.contains_key(&key) {
@@ -136,13 +142,18 @@ impl Fonts {
         self.add_typeface(family, bytes).map_or(State::Missing, |_| State::Loaded)
     }
 
-    fn add_typeface(&mut self, family: &str, bytes: &[u8]) -> Option<skia_safe::Typeface> {
+    /// A typeface from font file bytes, without making it available to documents.
+    pub fn typeface(&self, bytes: &[u8]) -> Option<skia_safe::Typeface> {
         // Browsers get WOFF2 from Google Fonts, which the wasm build's FreeType can't read.
         #[cfg(target_os = "emscripten")]
         let decoded = woff2_patched::decode::is_woff2(bytes).then(|| woff2_patched::decode::convert_woff2_to_ttf(&mut &bytes[..]).ok()).flatten();
         #[cfg(target_os = "emscripten")]
         let bytes = decoded.as_deref().unwrap_or(bytes);
-        let tf = self.mgr.new_from_data(skia_safe::Data::new_copy(bytes), None)?;
+        self.mgr.new_from_data(skia_safe::Data::new_copy(bytes), None)
+    }
+
+    fn add_typeface(&mut self, family: &str, bytes: &[u8]) -> Option<skia_safe::Typeface> {
+        let tf = self.typeface(bytes)?;
         self.provider.register_typeface(tf.clone(), Some(family));
         self.collection.clear_caches();
         self.generation += 1;

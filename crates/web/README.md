@@ -82,6 +82,10 @@ The canvas draws the same controls as the desktop app:
   in.
 - **Light/dark switch**, bottom right: clicking it fires `themechange`.
 
+The controls, frame titles and selection labels are set in Inter's Latin and Latin Extended
+subsets, which are built into the viewer, so they draw immediately and don't depend on Google
+Fonts. Inter is under the SIL Open Font License; `Inter-OFL.txt` ships next to the viewer.
+
 Turn any of them off, at creation or later, and drive the same behavior from your own UI:
 
 ```js
@@ -137,7 +141,7 @@ Events come from `viewer.addEventListener(type, (e) => …)`, with data in `e.de
 | `nodecontextmenu` | `{ node, x, y, event }` | Right-click. The node is selected first. `e.detail.event.preventDefault()` hides the browser menu |
 | `hover` | `{ node }` | The node under the pointer changed |
 | `viewchange` | `{ camera }` | The view moved; re-read `node(id).screen` |
-| `warning` | `{ message }` | A script failed, a file is missing, ... |
+| `warning` | `{ message }` | A script, import, image, shader or font failed to load or run (see below) |
 | `themechange` | `{ theme }` | The built-in light/dark switch was clicked (`"light"` or `"dark"`) |
 | `layoutchange` | `{ rows }` | The changes layout's rows changed (see "Showing only what changed") |
 
@@ -433,8 +437,13 @@ and resolved from the document's `path`. Return a `Uint8Array`, `ArrayBuffer` or
 `null` if the file doesn't exist. Imported documents are scanned for their own files too.
 
 `viewer.addFile(path, data)` provides or replaces a file directly, for example after the agent
-regenerates an image. Without `readFile`, files can only arrive through `addFile`, and missing
-ones produce `warning` events.
+regenerates an image. Without `readFile`, files can only arrive through `addFile`.
+
+A file the document uses but the viewer doesn't have produces a `warning` when it's needed, for
+example `assets/hero.png: the page didn't provide this image (see readFile)`. Images and shaders
+are read when they're first drawn, so their warnings can come after `load` resolves. Images that
+fail to decode or download warn too. `readFile` may also be asked about strings that only look
+like file names (a layer called `logo.svg`), so a `null` answer on its own doesn't warn.
 
 `script` nodes run their JavaScript in `study-sandbox.html`, inside an iframe with
 `sandbox="allow-scripts"`. That gives scripts an opaque origin: no access to your app's cookies,
@@ -474,7 +483,13 @@ to the system's fonts:
 
 4. **Missing families:** a family Google doesn't have (HTTP 400) is rendered entirely with the
    fallbacks.
-5. **Layout:** text lays out again as fonts arrive, as in the desktop app.
+5. **Warnings:** each family, weight or subset of the document's fonts that can't be loaded fires
+   a `warning`, for example `Font "Brand Sans" 400 couldn't be loaded from Google Fonts (it isn't
+   there, or the network failed)`. Google's 400 carries no CORS header, so in a browser a missing
+   family and a network failure look the same. A `fetch` hook that answers 400 or 404 itself
+   gets the more specific `isn't on Google Fonts`. Fallback fonts that fail produce one warning
+   in total.
+6. **Layout:** text lays out again as fonts arrive, as in the desktop app.
 
 The viewer also contacts `registry.npmjs.org` for icon sets (Lucide, Feather, Phosphor), and
 whatever hosts a document's image URLs point to. All of these need CORS, which Google and npm

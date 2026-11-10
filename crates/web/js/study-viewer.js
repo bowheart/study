@@ -80,7 +80,7 @@ export async function createViewer(canvas, options = {}) {
  * - `hover` `{node: NodeInfo|null}`
  * - `viewchange` `{camera: {x, y, zoom}}`: the camera moved. Re-read `node(id).screen` to keep a
  *   toolbar attached.
- * - `warning` `{message}`: a script node failed, an import or file is missing, ...
+ * - `warning` `{message}`: a script node failed, or an import, image, shader or font couldn't be loaded
  * - `themechange` `{theme}`: the built-in light/dark switch was clicked (`"light"` or `"dark"`).
  * - `layoutchange` `{rows}`: the changes layout's rows changed size, place or content (a `load`,
  *   fonts or scripts arriving, a resize, new options). Scrolling fires `viewchange` instead.

@@ -21,7 +21,7 @@ use render::overlay::{draw_nib, draw_scan, draw_working, Label};
 use render::{Renderer, View};
 use serde_json::{json, Map, Value};
 use skia_safe::gpu::{self, gl::FramebufferInfo, DirectContext};
-use skia_safe::{Canvas, Color, Color4f, Contains, Font, FontStyle, Paint, PaintStyle, PathBuilder, Point, Surface};
+use skia_safe::{Canvas, Color, Color4f, Contains, Font, Paint, PaintStyle, PathBuilder, Point, Surface};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::{c_char, c_void, CString};
 use std::path::{Path, PathBuf};
@@ -47,7 +47,6 @@ const SCAN_SECS: f32 = 2.2;
 /// How long a frame keeps glowing after the agent last touched it, and its fade-out.
 const WORK_HOLD: f32 = 20.0;
 const WORK_FADE: f32 = 2.5;
-const UI_FAMILY: &str = "Inter";
 /// Longest edge of a node snapshot, like the MCP screenshot tool's.
 const SNAPSHOT_EDGE: f32 = 1568.0;
 
@@ -58,17 +57,50 @@ struct Camera {
     zoom: f32,
 }
 
-/// Frame titles and badges, in Inter once it has downloaded (the page has no system fonts).
-struct UiFont(Option<Font>);
+/// Frame titles, badges, the breadcrumb and the zoom level. The page has no system fonts, so
+/// Inter's Latin and Latin Extended subsets are built in: the controls never wait on a download
+/// or depend on what a downloaded font calls itself. Each character uses the first subset that
+/// has it.
+struct UiFont(Vec<Font>);
+
+impl UiFont {
+    fn new(fonts: &render::fonts::Fonts) -> UiFont {
+        const FILES: [&[u8]; 2] = [include_bytes!("../fonts/inter-latin.woff2"), include_bytes!("../fonts/inter-latin-ext.woff2")];
+        UiFont(FILES.iter().filter_map(|b| fonts.typeface(b)).map(|t| Font::new(t, 12.0)).collect())
+    }
+
+    /// `s` split into runs that share a font.
+    fn runs<'s>(&self, s: &'s str) -> Vec<(&'s str, &Font)> {
+        let Some(first) = self.0.first() else { return Vec::new() };
+        let pick = |ch: char| self.0.iter().find(|f| f.unichar_to_glyph(ch as i32) != 0).unwrap_or(first);
+        let mut out: Vec<(&str, &Font)> = Vec::new();
+        let mut start = 0;
+        let mut current = first;
+        for (i, ch) in s.char_indices() {
+            let f = if ch.is_whitespace() { current } else { pick(ch) };
+            if i > 0 && !std::ptr::eq(f, current) {
+                out.push((&s[start..i], current));
+                start = i;
+            }
+            current = f;
+        }
+        if start < s.len() {
+            out.push((&s[start..], current));
+        }
+        out
+    }
+}
 
 impl Label for UiFont {
     fn measure(&self, s: &str) -> f32 {
-        self.0.as_ref().map_or(0.0, |f| f.measure_str(s, None).0)
+        self.runs(s).iter().map(|(t, f)| f.measure_str(t, None).0).sum()
     }
 
-    fn draw(&self, canvas: &Canvas, s: &str, at: (f32, f32), paint: &Paint) {
-        if let Some(f) = &self.0 {
-            canvas.draw_str(s, at, f, paint);
+    fn draw(&self, canvas: &Canvas, s: &str, (x, y): (f32, f32), paint: &Paint) {
+        let mut x = x;
+        for (t, f) in self.runs(s) {
+            canvas.draw_str(t, (x, y), f, paint);
+            x += f.measure_str(t, None).0;
         }
     }
 }
@@ -253,7 +285,7 @@ impl Viewer {
         let surface = make_surface(&mut gr, fb, w, h);
         let mut renderer = Renderer::new();
         renderer.base_dir = FILES.into();
-        renderer.text.fonts.request(UI_FAMILY, 400, false);
+        let ui = UiFont::new(&renderer.text.fonts);
         Viewer {
             gr,
             fb,
@@ -280,7 +312,7 @@ impl Viewer {
             hover: None,
             show: Show::default(),
             ctrl_hover: None,
-            ui: UiFont(None),
+            ui,
             out: CString::default(),
             blob: Vec::new(),
         }
@@ -658,13 +690,24 @@ impl Viewer {
         if rebuild || fonts {
             self.refresh_changes();
         }
-        if self.ui.0.is_none() {
-            // Asked again each frame: its stylesheet arriving doesn't load the font by itself.
-            self.renderer.text.fonts.request(UI_FAMILY, 400, false);
-            // Until Inter arrives, the lookup falls back to an empty typeface.
-            let tf = self.renderer.text.fonts.collection.find_typefaces(&[UI_FAMILY], FontStyle::normal());
-            self.ui = UiFont(tf.into_iter().find(|t| t.family_name() == UI_FAMILY).map(|t| Font::new(t, 12.0)));
+    }
+
+    /// Warnings since the last call, including fonts, images and shaders that failed to load
+    /// (those are found while drawing).
+    fn take_warnings(&mut self) -> Vec<String> {
+        let page = |key: &str| key.strip_prefix(FILES).map_or(key, |p| p.trim_start_matches('/')).to_string();
+        let mut out = std::mem::take(&mut self.warnings);
+        out.extend(self.renderer.text.fonts.take_warnings());
+        for (key, why) in self.renderer.images.take_failures() {
+            out.push(if why == "not found" { format!("{}: the page didn't provide this image (see `readFile`)", page(&key)) } else { format!("{}: {why}", page(&key)) });
         }
+        for (path, e) in std::mem::take(&mut self.renderer.shaders.errors) {
+            let key = page(&path.to_string_lossy());
+            out.push(if path.exists() { format!("{key}: {e}") } else { format!("{key}: the page didn't provide this shader (see `readFile`)") });
+        }
+        let mut seen = HashSet::new();
+        out.retain(|w| seen.insert(w.clone()));
+        out
     }
 
     /// Draws a frame. Returns true if another should follow (animations, loading thumbnails).
@@ -1386,11 +1429,12 @@ pub extern "C" fn study_scroll_to_row(v: *mut Viewer, ptr: *const u8, len: usize
     viewer(v).scroll_to_row(&string(ptr, len))
 }
 
-/// Problems since the last call (script and import failures), as a JSON array, or null.
+/// Problems since the last call (scripts, imports, fonts, images and shaders that failed), as a
+/// JSON array, or null.
 #[unsafe(no_mangle)]
 pub extern "C" fn study_warnings(v: *mut Viewer) -> *const c_char {
     let v = viewer(v);
-    let w = std::mem::take(&mut v.warnings);
+    let w = v.take_warnings();
     give(v, (!w.is_empty()).then(|| serde_json::to_string(&w).unwrap_or_default()))
 }
 

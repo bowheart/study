@@ -167,8 +167,13 @@ style (variables and themes applied, instances expanded) plus computed rects and
     Math has no range at all and Symbols 2 claims ⌘ without having it.
   - Stylesheet arrivals count as font changes, so texts relayout and request the subsets they
     now know about.
-  - The UI font for frame titles is Inter, downloaded like any document font, because the page
-    has no system fonts.
+  - The UI font (controls, frame titles, labels) is Inter's Latin and Latin Extended WOFF2
+    subsets from `crates/web/fonts`, compiled in with `include_bytes!`. The page has no system
+    fonts, and a downloaded Inter can't be found reliably by its internal family name. Each
+    character uses the first subset that has it (`UiFont::runs`).
+  - Warnings: `Fonts::take_warnings` (web build) reports document font cuts and subsets that
+    failed, and fallback failures once. `Images::take_failures` and `Shaders::errors` are found
+    while drawing, so `study_warnings` collects all three when the page asks, after each frame.
 - **Files.** The page's files live in Emscripten's in-memory filesystem under `/doc/<path>`.
   - `study_file_refs` scans the document's JSON string literals for relative paths with file
     extensions (images, shader and script sources, `.pen` imports). It recurses into imported

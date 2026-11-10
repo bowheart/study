@@ -36,8 +36,8 @@ pub const DEFAULT_FALLBACKS: &[&str] = &[
 ];
 
 enum Arrival {
-    Css(Key, Option<String>),
-    Subset(Key, usize, Option<Vec<u8>>),
+    Css(Key, Result<String, Option<u16>>),
+    Subset(Key, usize, Result<Vec<u8>, Option<u16>>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,6 +85,9 @@ pub struct Web {
     /// Families with at least one subset registered.
     loaded: HashSet<String>,
     pub fallbacks: Vec<String>,
+    /// Fonts that failed to load, for the page's `warning` event.
+    pub warnings: Vec<String>,
+    fallback_warned: bool,
     tx: Sender<Arrival>,
     rx: Receiver<Arrival>,
 }
@@ -97,6 +100,8 @@ impl Web {
             aliases: HashMap::new(),
             loaded: HashSet::new(),
             fallbacks: DEFAULT_FALLBACKS.iter().map(|s| s.to_string()).collect(),
+            warnings: Vec::new(),
+            fallback_warned: false,
             tx,
             rx,
         }
@@ -169,7 +174,7 @@ impl Fonts {
             let tx = self.web.tx.clone();
             let key = key.clone();
             crate::net::get(url, 64 << 20, move |reply| {
-                let _ = tx.send(Arrival::Subset(key, i, reply.ok()));
+                let _ = tx.send(Arrival::Subset(key, i, reply));
             });
         }
         Some(rest)
@@ -181,9 +186,21 @@ impl Fonts {
         let fam = key.0.replace(' ', "+");
         let spec = if key.2 { format!("ital,wght@1,{}", key.1) } else { format!("wght@{}", key.1) };
         crate::net::get(format!("https://fonts.googleapis.com/css2?family={fam}:{spec}"), 1 << 20, move |reply| {
-            let css = reply.ok().map(|b| String::from_utf8_lossy(&b).into_owned());
+            let css = reply.map(|b| String::from_utf8_lossy(&b).into_owned());
             let _ = tx.send(Arrival::Css(key, css));
         });
+    }
+
+    /// Records a failed font. Failures of the fallback families are reported once: they're
+    /// study's choice, not the document's, and fail together when the network is down.
+    fn warn(&mut self, family: &str, message: String) {
+        if self.web.fallbacks.iter().any(|f| f == family) {
+            if !std::mem::replace(&mut self.web.fallback_warned, true) {
+                self.web.warnings.push(format!("{message}. Characters the document's fonts lack may not show; later fallback font failures aren't reported"));
+            }
+        } else {
+            self.web.warnings.push(message);
+        }
     }
 
     /// Takes finished downloads. True if layout should rerun: new typefaces, or a stylesheet that
@@ -194,7 +211,18 @@ impl Fonts {
             self.pending = self.pending.saturating_sub(1);
             match arrival {
                 Arrival::Css(key, css) => {
-                    let subsets = css.map(|c| parse(&c)).filter(|s| !s.is_empty());
+                    let subsets = css.as_ref().ok().map(|c| parse(c)).filter(|s| !s.is_empty());
+                    if subsets.is_none() {
+                        let message = match css {
+                            Ok(_) | Err(Some(400 | 404)) if key.1 == 400 && !key.2 => format!("Font \"{}\" isn't on Google Fonts; its text uses a fallback font", key.0),
+                            Ok(_) | Err(Some(400 | 404)) => format!("Font \"{}\" has no {} on Google Fonts; the nearest loaded cut stands in", key.0, cut(&key)),
+                            // Google Fonts' 400 for a family or cut it doesn't have carries no CORS
+                            // header, so to a page it looks like a network failure.
+                            Err(None) => format!("Font \"{}\" {} couldn't be loaded from Google Fonts (it isn't there, or the network failed)", key.0, cut(&key)),
+                            Err(Some(s)) => format!("Font \"{}\" {} couldn't be loaded from Google Fonts (HTTP {s})", key.0, cut(&key)),
+                        };
+                        self.warn(&key.0, message);
+                    }
                     self.web.cuts.insert(key, subsets.map_or(Cut::Missing, Cut::Ready));
                     changed = true;
                 }
@@ -203,8 +231,19 @@ impl Fonts {
                     subsets[i].load = Load::Done;
                     // Even a failed subset changes what texts fall back to.
                     changed = true;
-                    let name = if i == base(subsets) { key.0.clone() } else { format!("{}#{}", key.0, subsets[i].name) };
-                    let Some(tf) = bytes.and_then(|b| self.add_typeface(&name, &b)) else { continue };
+                    let subset = subsets[i].name.clone();
+                    let name = if i == base(subsets) { key.0.clone() } else { format!("{}#{}", key.0, subset) };
+                    let tf = match bytes {
+                        Ok(b) => self.add_typeface(&name, &b),
+                        Err(status) => {
+                            self.warn(&key.0.clone(), format!("Font \"{}\" {} ({subset}) failed to download ({})", key.0, cut(&key), failure(status)));
+                            continue;
+                        }
+                    };
+                    let Some(tf) = tf else {
+                        self.warn(&key.0.clone(), format!("Font \"{}\" {} ({subset}) isn't a font file study can read", key.0, cut(&key)));
+                        continue;
+                    };
                     if let Some(Cut::Ready(subsets)) = self.web.cuts.get_mut(&key) {
                         subsets[i].typeface = Some(tf);
                     }
@@ -233,6 +272,15 @@ impl Fonts {
         }
         out
     }
+}
+
+/// "700 italic", for messages.
+fn cut(key: &Key) -> String {
+    format!("{}{}", key.1, if key.2 { " italic" } else { "" })
+}
+
+fn failure(status: Option<u16>) -> String {
+    status.map_or("network error".to_string(), |s| format!("HTTP {s}"))
 }
 
 /// The `@font-face` rules of a Google Fonts stylesheet, named by the comment before each.
