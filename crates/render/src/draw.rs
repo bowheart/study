@@ -47,7 +47,11 @@ pub struct Renderer {
     pub base_dir: PathBuf,
     /// Number of nodes painted in the last frame (for diagnostics).
     pub drawn: usize,
-    thumbs: HashMap<u32, Thumb>,
+    /// By `layer` (high 32 bits) and root id.
+    thumbs: HashMap<u64, Thumb>,
+    /// Which document is being drawn, when one renderer draws several (the web viewer's overlay):
+    /// keeps their cached thumbnails apart, since root ids repeat across documents.
+    pub layer: u32,
     thumb_bytes: usize,
     frame: u64,
     /// Time left this frame for building thumbnails.
@@ -129,6 +133,7 @@ impl Renderer {
             base_dir: PathBuf::from("."),
             drawn: 0,
             thumbs: HashMap::new(),
+            layer: 0,
             thumb_bytes: 0,
             frame: 0,
             thumb_budget: None,
@@ -207,13 +212,14 @@ impl Renderer {
         let b = scene.bounds[0];
         // Power-of-two scale buckets so small zoom changes reuse the same raster.
         let want = 2f32.powf(view.scale.log2().ceil());
-        let fresh = self.thumbs.get(&root.0).is_some_and(|t| t.stamp == scene.stamp && t.scale >= want * 0.99 && t.scale <= want * 2.01);
+        let key = (self.layer as u64) << 32 | root.0 as u64;
+        let fresh = self.thumbs.get(&key).is_some_and(|t| t.stamp == scene.stamp && t.scale >= want * 0.99 && t.scale <= want * 2.01);
         if !fresh {
             let over_budget = self.thumb_budget.is_some_and(|d| std::time::Instant::now() > d);
             if over_budget {
                 // Placeholder this frame: the stale thumb if any, else a flat block.
                 self.needs_redraw = true;
-                if let Some(t) = self.thumbs.get(&root.0) {
+                if let Some(t) = self.thumbs.get(&key) {
                     if t.stamp == scene.stamp {
                         let img = t.image.clone();
                         blit(canvas, &img, b);
@@ -239,13 +245,13 @@ impl Renderer {
                 self.fine = false;
             }
             let image = surface.image_snapshot();
-            if let Some(old) = self.thumbs.insert(root.0, Thumb { image, scale: want, stamp: scene.stamp, used: self.frame }) {
+            if let Some(old) = self.thumbs.insert(key, Thumb { image, scale: want, stamp: scene.stamp, used: self.frame }) {
                 self.thumb_bytes = self.thumb_bytes.saturating_sub(old.image.width() as usize * old.image.height() as usize * 4);
             }
             self.thumb_bytes += (w * h * 4) as usize;
             self.evict_thumbs();
         }
-        let t = self.thumbs.get_mut(&root.0).unwrap();
+        let t = self.thumbs.get_mut(&key).unwrap();
         t.used = self.frame;
         let img = t.image.clone();
         blit(canvas, &img, b);
@@ -256,7 +262,7 @@ impl Renderer {
         if self.thumb_bytes <= THUMB_CACHE_BYTES {
             return;
         }
-        let mut by_age: Vec<(u64, u32)> = self.thumbs.iter().map(|(k, t)| (t.used, *k)).collect();
+        let mut by_age: Vec<(u64, u64)> = self.thumbs.iter().map(|(k, t)| (t.used, *k)).collect();
         by_age.sort();
         for (_, k) in by_age {
             if self.thumb_bytes <= THUMB_CACHE_BYTES * 3 / 4 {

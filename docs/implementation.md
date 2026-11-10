@@ -200,6 +200,17 @@ style (variables and themes applied, instances expanded) plus computed rects and
   shared with the desktop window. Each frame, the viewer lays them out from the selection
   (`RootScene::ancestors`) and the camera, draws them last, and checks pointer input against
   them (`study_on_controls`/`study_press`) before the canvas sees it. `Show` turns each one off.
+- **Layers.** A `Layer` is a document with its vars, imports and laid-out scenes. The viewer's
+  `main` is the one shown; `overlay` is drawn over it inside `save_layer_alpha` (onion skin),
+  and `other` holds a version `compare` is waiting on. All of them share the renderer, so fonts
+  and images load once. `Renderer::layer` keeps their cached thumbnails apart, since root ids
+  repeat across documents. Script results and arriving fonts rebuild every layer (`pump`).
+- **Compare.** `pen::diff::compare` matches scene nodes by key (instance paths inside
+  instances). Properties come from the node's own JSON, or from `instance::expand` for instance
+  nodes, so component edits show where they render. `moved` is a parent change, or not being in
+  the longest run of siblings that kept their order. `bounds` counts only boxes that changed
+  relative to their parent. `compare` waits for `settling()` (font downloads, script runs)
+  through `study_pump`, not frames, because background tabs don't get animation frames.
 - **MCP for host apps.** Headless `study mcp` with `STUDY_EVENTS=<file>` appends one JSON line
   per execute call (`record_presence`). The line carries `size`/`sha256` of the bytes the call
   saved (`Engine::saved`, from the text `Document::save_as` returns) and `created` (set by

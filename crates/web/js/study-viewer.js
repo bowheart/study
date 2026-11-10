@@ -90,6 +90,8 @@ export class Viewer extends EventTarget {
   #cleanup = [];
   #camera = "";
   #loads = 0;
+  #path = "document.pen";
+  #compares = Promise.resolve();
   #sandbox = null;
   #theme = "system";
   #controls = { breadcrumb: true, zoom: true, theme: true };
@@ -127,32 +129,96 @@ export class Viewer extends EventTarget {
   async load(pen, { path = "document.pen" } = {}) {
     const bytes = toBytes(pen);
     const ticket = ++this.#loads;
-    const read = this.#opts.readFile;
-    if (read) {
-      const tried = new Set();
-      for (let round = 0; round < 8; round++) {
-        const missing = this.#json(this.#withBytes(bytes, (p, n) => this.#withBytes(path, (pp, pn) => this.#m._study_file_refs(this.#v, p, n, pp, pn)))) ?? [];
-        const todo = missing.filter((f) => !tried.has(f));
-        if (!todo.length) break;
-        await Promise.all(todo.map(async (file) => {
-          tried.add(file);
-          let data = null;
-          try { data = await read(file); } catch { data = null; }
-          if (data != null && !this.#destroyed) this.addFile(file, data);
-        }));
-        if (ticket !== this.#loads || this.#destroyed) return;
-      }
-    }
+    if (!(await this.#provideFiles(bytes, path, () => ticket === this.#loads))) return;
     const before = this.#selectionIds();
     const err = this.#withBytes(bytes, (p, n) => this.#withBytes(path, (pp, pn) => this.#m._study_load(this.#v, p, n, pp, pn)));
     this.redraw();
     if (err) throw new Error(this.#m.UTF8ToString(err));
+    this.#path = path;
     this.#emitIfSelectionChanged(before);
   }
 
   /** Provides or replaces a file at a path relative to your app's root (see `readFile`). */
   addFile(path, data) {
     this.#withBytes(path, (pp, pn) => this.#withBytes(toBytes(data), (p, n) => this.#m._study_add_file(this.#v, pp, pn, p, n)));
+    this.redraw();
+  }
+
+  // ---------------------------------------------------------------- comparing versions
+
+  /**
+   * Outlines and tints nodes, apart from selection and hover: for showing what changed between
+   * versions. `kind` is `"added"` (green), `"changed"` (amber, the default), `"removed"` (red) or a
+   * `#rrggbb` colour. Each kind keeps its own set, so call once per kind; calling again replaces
+   * that kind's set. `highlight([])` clears every kind; `highlight([], { kind })` clears one.
+   */
+  highlight(ids, { kind } = {}) {
+    const ok = this.#withBytes(kind ?? "", (kp, kn) => this.#withBytes(JSON.stringify(ids ?? []), (p, n) => this.#m._study_highlight(this.#v, kp, kn, p, n)));
+    this.redraw();
+    if (!ok) throw new Error(`study: unknown highlight kind "${kind}"`);
+  }
+
+  /**
+   * @typedef {object} Comparison
+   * @property {string[]} added Nodes only in this viewer's document (outermost of each new subtree)
+   * @property {string[]} removed Nodes only in `before` (outermost of each removed subtree)
+   * @property {{id: string, props: string[], moved: boolean,
+   *   bounds: {before: object, after: object}|null}[]} changed Nodes in both that differ: properties
+   *   whose values differ, whether it changed parent or order, and its laid-out box when that moved
+   *   or resized (also when its own properties didn't change, for example pushed by a sibling)
+   * @property {string[]} frames Top-level nodes containing any of these
+   */
+
+  /**
+   * What changed from another version of the document (`before`) to the one this viewer shows,
+   * as laid out and rendered. Nodes match by id, or by instance path inside component instances,
+   * which are compared as they render, so a component edit shows up on every instance. Waits up to
+   * `timeout` ms for fonts and `script` nodes, so text measures the same in both. `path` is where
+   * `before` is kept, for its relative files (default: the same as the shown document).
+   * @returns {Promise<Comparison>}
+   */
+  compare(before, { path = this.#path, timeout = 10000 } = {}) {
+    const run = async () => {
+      const bytes = toBytes(before);
+      await this.#provideFiles(bytes, path, () => true);
+      if (this.#destroyed) throw new Error("study: viewer destroyed");
+      const err = this.#withBytes(bytes, (p, n) => this.#withBytes(path, (pp, pn) => this.#m._study_compare_start(this.#v, p, n, pp, pn)));
+      if (err) throw new Error(this.#m.UTF8ToString(err));
+      const until = performance.now() + timeout;
+      while (this.#m._study_settling(this.#v) && performance.now() < until && !this.#destroyed) {
+        // Not through frames: a background tab gets none.
+        this.#m._study_pump(this.#v);
+        this.#startDownloads();
+        this.#startScripts();
+        await new Promise((r) => setTimeout(r, 30));
+      }
+      return this.#json(this.#m._study_compare_result(this.#v));
+    };
+    const result = this.#compares.then(run, run);
+    this.#compares = result.catch(() => {});
+    return result;
+  }
+
+  /**
+   * Draws another document over the shown one, translucent (onion skin). `null` removes it.
+   * It isn't interactive; selection and hover stay on the shown document.
+   */
+  async setOverlay(pen, { path = this.#path, opacity = 0.5 } = {}) {
+    if (pen == null) {
+      this.#withBytes("", (p, n) => this.#m._study_set_overlay(this.#v, p, n, p, n, 0));
+    } else {
+      const bytes = toBytes(pen);
+      await this.#provideFiles(bytes, path, () => true);
+      if (this.#destroyed) return;
+      const err = this.#withBytes(bytes, (p, n) => this.#withBytes(path, (pp, pn) => this.#m._study_set_overlay(this.#v, p, n, pp, pn, opacity)));
+      if (err) throw new Error(this.#m.UTF8ToString(err));
+    }
+    this.redraw();
+  }
+
+  /** The overlay's opacity, 0–1. */
+  set overlayOpacity(opacity) {
+    this.#m._study_set_overlay_opacity(this.#v, opacity);
     this.redraw();
   }
 
@@ -313,6 +379,29 @@ export class Viewer extends EventTarget {
     } finally {
       this.#m._study_dealloc(p, bytes.length);
     }
+  }
+
+  /**
+   * Asks `options.readFile` for the files a document refers to that the viewer doesn't have,
+   * including those of imported documents. False if `wanted()` says the caller gave up meanwhile.
+   */
+  async #provideFiles(bytes, path, wanted) {
+    const read = this.#opts.readFile;
+    if (!read) return true;
+    const tried = new Set();
+    for (let round = 0; round < 8; round++) {
+      const missing = this.#json(this.#withBytes(bytes, (p, n) => this.#withBytes(path, (pp, pn) => this.#m._study_file_refs(this.#v, p, n, pp, pn)))) ?? [];
+      const todo = missing.filter((f) => !tried.has(f));
+      if (!todo.length) break;
+      await Promise.all(todo.map(async (file) => {
+        tried.add(file);
+        let data = null;
+        try { data = await read(file); } catch { data = null; }
+        if (data != null && !this.#destroyed) this.addFile(file, data);
+      }));
+      if (!wanted() || this.#destroyed) return false;
+    }
+    return true;
   }
 
   #str(ptr) { return ptr ? this.#m.UTF8ToString(ptr) : null; }

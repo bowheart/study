@@ -147,7 +147,7 @@ jobs:
         with:
           version: 7.0.0
       - run: crates/web/build.sh
-      - run: cd crates/web/dist && zip ../../../study-web.zip study-viewer.js study-web.js study_web.wasm study-sandbox.html demo.html showcase.pen
+      - run: cd crates/web/dist && zip ../../../study-web.zip study-viewer.js study-web.js study_web.wasm study-sandbox.html demo.html compare.html showcase.pen
       - uses: actions/upload-artifact@v4
         with:
           name: study-web.zip

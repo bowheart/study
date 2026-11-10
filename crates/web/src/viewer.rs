@@ -76,10 +76,126 @@ struct ScriptRuns {
     /// Jobs the page hasn't picked up yet: key and code.
     queue: Vec<(u64, String)>,
     asked: HashSet<u64>,
-    /// Roots that contain script nodes (rebuilt when results arrive).
-    roots: HashSet<NodeId>,
-    /// Set when results arrived; the next frame rebuilds `roots`.
+    /// Set when results arrived; the next frame rebuilds each layer's script roots.
     dirty: bool,
+}
+
+impl ScriptRuns {
+    /// Runs the page started that haven't come back.
+    fn outstanding(&self) -> bool {
+        !self.queue.is_empty() || self.asked.iter().any(|k| !self.done.contains_key(k))
+    }
+}
+
+/// A document and its laid-out top-level nodes. The viewer shows one; `compare` and the
+/// overlay lay out another the same way.
+struct Layer {
+    doc: Document,
+    vars: Vars,
+    imports: Imports,
+    scenes: HashMap<NodeId, RootScene>,
+    /// Roots that contain script nodes (rebuilt when results arrive).
+    script_roots: HashSet<NodeId>,
+    /// Folder its relative files resolve from.
+    base: PathBuf,
+}
+
+impl Layer {
+    /// Parses a document kept at page path `path`; `build` lays it out.
+    fn open(text: &str, path: &str, warnings: &mut Vec<String>) -> Result<Layer, String> {
+        let mut doc = Document::parse(text).map_err(|e| format!("{e:#}"))?;
+        let file = Path::new(FILES).join(clean(path).unwrap_or_else(|| "document.pen".into()));
+        let base = file.parent().map(Path::to_path_buf).unwrap_or_else(|| FILES.into());
+        let _ = std::fs::create_dir_all(&base);
+        doc.path = Some(file);
+        let imports = Imports::load(&doc);
+        warnings.extend(imports.errors.iter().cloned());
+        let mut vars = Vars::new(&doc);
+        vars.add_imported(&imports.variables);
+        Ok(Layer { doc, vars, imports, scenes: HashMap::new(), script_roots: HashSet::new(), base })
+    }
+
+    /// Compiles and lays out the given roots (all when `None`), running script nodes.
+    fn build(&mut self, only: Option<Vec<NodeId>>, renderer: &mut Renderer, runs: &mut ScriptRuns, warnings: &mut Vec<String>) {
+        let roots = only.unwrap_or_else(|| self.doc.roots.clone());
+        if roots.len() == self.doc.roots.len() {
+            self.scenes.clear();
+        }
+        for r in roots {
+            let mut s = compile_root_with(&self.doc, &self.vars, r, Some(&self.imports));
+            layout(&mut s, &mut renderer.text);
+            if run_scripts(&mut s, &self.doc, &self.vars, &self.imports, &self.base, runs, warnings) {
+                self.script_roots.insert(r);
+                layout(&mut s, &mut renderer.text);
+            }
+            compute_bounds(&mut s);
+            self.scenes.insert(r, s);
+        }
+    }
+
+    fn rebuild_scripts(&mut self, renderer: &mut Renderer, runs: &mut ScriptRuns, warnings: &mut Vec<String>) {
+        if !self.script_roots.is_empty() {
+            let roots = self.script_roots.iter().copied().collect();
+            self.build(Some(roots), renderer, runs, warnings);
+        }
+    }
+
+    fn relayout(&mut self, renderer: &mut Renderer) {
+        for s in self.scenes.values_mut() {
+            layout(s, &mut renderer.text);
+            compute_bounds(s);
+        }
+    }
+
+    /// Top-level scenes in document order.
+    fn ordered(&self) -> Vec<&RootScene> {
+        self.doc.roots.iter().filter_map(|r| self.scenes.get(r)).collect()
+    }
+
+    fn bounds(&self) -> Option<Rect> {
+        self.ordered().iter().filter_map(|s| s.bounds.first().copied()).filter(|b| b.w >= 0.0).reduce(|a, b| a.union(&b))
+    }
+
+    /// Scene and index for a node id or instance path.
+    fn locate(&self, key: &str) -> Option<(&RootScene, u32)> {
+        let n = self.doc.find(key.split('/').next()?)?;
+        if !self.doc.node(n).attached {
+            return None;
+        }
+        let scene = self.scenes.get(&self.doc.root_of(n))?;
+        let i = if key.contains('/') { scene.lookup(key, &self.doc)? } else { scene.lookup_node(n)? };
+        Some((scene, i))
+    }
+
+    fn version(&self) -> pen::diff::Version<'_> {
+        pen::diff::Version { doc: &self.doc, scenes: &self.scenes }
+    }
+}
+
+/// A persistent outline and tint on some nodes (`highlight`), separate from selection and hover.
+struct Highlight {
+    kind: String,
+    color: Color4f,
+    keys: Vec<String>,
+}
+
+/// The colour for a highlight kind: `added`, `changed`, `removed`, or `#rgb`/`#rrggbb`.
+fn highlight_color(kind: &str) -> Option<Color4f> {
+    let rgb = |r: u8, g: u8, b: u8| Some(Color4f::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0));
+    match kind {
+        "added" => rgb(0x16, 0xA3, 0x4A),
+        "changed" => rgb(0xF5, 0x9E, 0x0B),
+        "removed" => rgb(0xDC, 0x26, 0x26),
+        _ => {
+            let hex = kind.strip_prefix('#')?;
+            let hex: String = if hex.len() == 3 { hex.chars().flat_map(|c| [c, c]).collect() } else { hex.to_string() };
+            if hex.len() != 6 {
+                return None;
+            }
+            let n = u32::from_str_radix(&hex, 16).ok()?;
+            rgb((n >> 16) as u8, (n >> 8) as u8, n as u8)
+        }
+    }
 }
 
 pub struct Viewer {
@@ -89,10 +205,13 @@ pub struct Viewer {
     /// Canvas size in CSS pixels, and device pixels per CSS pixel.
     size: (f32, f32),
     dpr: f32,
-    doc: Option<Document>,
-    vars: Option<Vars>,
-    imports: Imports,
-    scenes: HashMap<NodeId, RootScene>,
+    /// The document shown.
+    main: Option<Layer>,
+    /// Another document drawn translucently over it (`setOverlay`), and its opacity.
+    overlay: Option<(Layer, f32)>,
+    /// The other version while `compare` waits for its fonts and scripts.
+    other: Option<Layer>,
+    highlights: Vec<Highlight>,
     renderer: Renderer,
     scripts: ScriptRuns,
     /// Problems to report to the page (script and import failures).
@@ -133,10 +252,10 @@ impl Viewer {
             surface,
             size: (w as f32 / dpr, h as f32 / dpr),
             dpr,
-            doc: None,
-            vars: None,
-            imports: Imports::default(),
-            scenes: HashMap::new(),
+            main: None,
+            overlay: None,
+            other: None,
+            highlights: Vec::new(),
             renderer,
             scripts: ScriptRuns::default(),
             warnings: Vec::new(),
@@ -166,20 +285,10 @@ impl Viewer {
     /// Replaces the document; `path` is where the page keeps it (relative files resolve from
     /// there). The camera stays put, except on the first load, which fits.
     fn load(&mut self, text: &str, path: &str) -> Result<(), String> {
-        let mut doc = Document::parse(text).map_err(|e| format!("{e:#}"))?;
-        let file = Path::new(FILES).join(clean(path).unwrap_or_else(|| "document.pen".into()));
-        let dir = file.parent().map(Path::to_path_buf).unwrap_or_else(|| FILES.into());
-        let _ = std::fs::create_dir_all(&dir);
-        doc.path = Some(file);
-        self.renderer.base_dir = dir;
-        self.imports = Imports::load(&doc);
-        self.warnings.extend(self.imports.errors.iter().cloned());
-        let mut vars = Vars::new(&doc);
-        vars.add_imported(&self.imports.variables);
-        self.vars = Some(vars);
-        self.doc = Some(doc);
-        self.scripts.roots.clear();
-        self.rebuild(None);
+        let mut layer = Layer::open(text, path, &mut self.warnings)?;
+        layer.build(None, &mut self.renderer, &mut self.scripts, &mut self.warnings);
+        self.renderer.base_dir = layer.base.clone();
+        self.main = Some(layer);
         let selection = std::mem::take(&mut self.selection);
         self.selection = selection.into_iter().filter(|k| self.locate(k).is_some()).collect();
         if self.hover.as_ref().is_some_and(|k| self.locate(k).is_none()) {
@@ -188,36 +297,71 @@ impl Viewer {
         Ok(())
     }
 
-    /// Compiles and lays out the given roots (all when `None`), running script nodes.
-    fn rebuild(&mut self, only: Option<Vec<NodeId>>) {
-        let (Some(doc), Some(vars)) = (&self.doc, &self.vars) else { return };
-        let roots = only.unwrap_or_else(|| doc.roots.clone());
-        if roots.len() == doc.roots.len() {
-            self.scenes.clear();
-        }
-        let base = self.renderer.base_dir.clone();
-        for r in roots {
-            let mut s = compile_root_with(doc, vars, r, Some(&self.imports));
-            layout(&mut s, &mut self.renderer.text);
-            if run_scripts(&mut s, doc, vars, &self.imports, &base, &mut self.scripts, &mut self.warnings) {
-                self.scripts.roots.insert(r);
-                layout(&mut s, &mut self.renderer.text);
-            }
-            compute_bounds(&mut s);
-            self.scenes.insert(r, s);
-        }
-    }
-
-    fn relayout(&mut self) {
-        for s in self.scenes.values_mut() {
-            layout(s, &mut self.renderer.text);
-            compute_bounds(s);
-        }
-    }
-
     fn bounds(&self) -> Option<Rect> {
-        let doc = self.doc.as_ref()?;
-        doc.roots.iter().filter_map(|r| self.scenes.get(r)?.bounds.first().copied()).filter(|b| b.w >= 0.0).reduce(|a, b| a.union(&b))
+        self.main.as_ref()?.bounds()
+    }
+
+    /// Persistent outlines: `keys` for `kind` replace that kind's earlier ones; no kind and no
+    /// keys clears them all. False for an unknown kind.
+    fn highlight(&mut self, kind: &str, keys: Vec<String>) -> bool {
+        if kind.is_empty() && keys.is_empty() {
+            self.highlights.clear();
+            return true;
+        }
+        let kind = if kind.is_empty() { "changed" } else { kind };
+        let Some(color) = highlight_color(kind) else { return false };
+        self.highlights.retain(|h| h.kind != kind);
+        if !keys.is_empty() {
+            self.highlights.push(Highlight { kind: kind.to_string(), color, keys });
+        }
+        true
+    }
+
+    /// Starts comparing the shown document with another version (`text` at page path `path`):
+    /// lays it out; `compare_result` reports once its fonts and scripts are in.
+    fn compare_start(&mut self, text: &str, path: &str) -> Result<(), String> {
+        let mut layer = Layer::open(text, path, &mut self.warnings)?;
+        layer.build(None, &mut self.renderer, &mut self.scripts, &mut self.warnings);
+        self.other = Some(layer);
+        Ok(())
+    }
+
+    /// Whether downloads or script runs that could change a layout are still out.
+    fn settling(&self) -> bool {
+        self.renderer.text.fonts.has_pending() || self.scripts.outstanding()
+    }
+
+    /// What changed from the other version (`before`) to the shown one, as JSON.
+    fn compare_result(&mut self) -> Option<Value> {
+        let other = self.other.take()?;
+        let main = self.main.as_ref()?;
+        let d = pen::diff::compare(&other.version(), &main.version());
+        let rect = |r: Rect| json!({"x": r.x, "y": r.y, "width": r.w, "height": r.h});
+        let changed: Vec<Value> = d
+            .changed
+            .iter()
+            .map(|c| {
+                json!({
+                    "id": c.id,
+                    "props": c.props,
+                    "moved": c.moved,
+                    "bounds": c.bounds.map(|(a, b)| json!({"before": rect(a), "after": rect(b)})),
+                })
+            })
+            .collect();
+        Some(json!({"added": d.added, "removed": d.removed, "changed": changed, "frames": d.frames}))
+    }
+
+    /// Draws another version over the shown one at `opacity` (`text` empty: removes it).
+    fn set_overlay(&mut self, text: &str, path: &str, opacity: f32) -> Result<(), String> {
+        if text.is_empty() {
+            self.overlay = None;
+            return Ok(());
+        }
+        let mut layer = Layer::open(text, path, &mut self.warnings)?;
+        layer.build(None, &mut self.renderer, &mut self.scripts, &mut self.warnings);
+        self.overlay = Some((layer, opacity.clamp(0.0, 1.0)));
+        Ok(())
     }
 
     fn fit(&mut self, r: Option<Rect>) {
@@ -241,14 +385,7 @@ impl Viewer {
 
     /// Scene and index for a node id or instance path.
     fn locate(&self, key: &str) -> Option<(&RootScene, u32)> {
-        let doc = self.doc.as_ref()?;
-        let n = doc.find(key.split('/').next()?)?;
-        if !doc.node(n).attached {
-            return None;
-        }
-        let scene = self.scenes.get(&doc.root_of(n))?;
-        let i = if key.contains('/') { scene.lookup(key, doc)? } else { scene.lookup_node(n)? };
-        Some((scene, i))
+        self.main.as_ref()?.locate(key)
     }
 
     fn abs_rect(&self, key: &str) -> Option<Rect> {
@@ -277,9 +414,9 @@ impl Viewer {
 
     /// Deepest selectable node under a point in CSS pixels.
     fn hit(&self, sx: f32, sy: f32) -> Option<String> {
-        let doc = self.doc.as_ref()?;
+        let main = self.main.as_ref()?;
         let (x, y) = (self.cam.x + sx / self.cam.zoom, self.cam.y + sy / self.cam.zoom);
-        doc.roots.iter().rev().filter_map(|r| self.scenes.get(r)).find_map(|s| s.hit(x, y).map(|i| s.nodes[i as usize].key().to_string()))
+        main.ordered().into_iter().rev().find_map(|s| s.hit(x, y).map(|i| s.nodes[i as usize].key().to_string()))
     }
 
     /// The desktop's click: select what's under the point (`toggle` adds/removes it).
@@ -316,7 +453,7 @@ impl Viewer {
 
     /// What the page needs to know about a node: identity, place in the tree, and where it is.
     fn node_info(&self, key: &str) -> Option<Value> {
-        let doc = self.doc.as_ref()?;
+        let doc = &self.main.as_ref()?.doc;
         let (s, i) = self.locate(key)?;
         let n = &s.nodes[i as usize];
         let b = self.doc_box(key)?;
@@ -341,7 +478,7 @@ impl Viewer {
 
     /// The node's own JSON from the document (inside an instance: the component's node).
     fn node_json(&self, key: &str) -> Option<Value> {
-        let doc = self.doc.as_ref()?;
+        let doc = &self.main.as_ref()?.doc;
         let (s, i) = self.locate(key)?;
         Some(doc.to_value(s.nodes[i as usize].src?))
     }
@@ -350,8 +487,8 @@ impl Viewer {
     fn snapshot(&mut self, key: &str, scale: Option<f32>) -> Option<Vec<u8>> {
         let region = self.doc_box(key)?;
         let scale = scale.unwrap_or((SNAPSHOT_EDGE / region.w.max(region.h)).min(2.0));
-        let doc = self.doc.as_ref()?;
-        let scenes: Vec<&RootScene> = doc.roots.iter().filter_map(|r| self.scenes.get(r)).collect();
+        let main = self.main.as_ref()?;
+        let scenes = main.ordered();
         let img = render::offscreen::render_region(&mut self.renderer, &scenes, region, scale, None)?;
         render::offscreen::encode(&img, "png", None)
     }
@@ -370,7 +507,7 @@ impl Viewer {
 
     /// The built-in controls, laid out for the canvas (CSS px).
     fn controls(&self) -> render::controls::Layout {
-        let show = Show { zoom: self.show.zoom && self.doc.is_some(), ..self.show };
+        let show = Show { zoom: self.show.zoom && self.main.is_some(), ..self.show };
         render::controls::layout(show, self.size, &self.crumbs(), self.cam.zoom, &self.ui)
     }
 
@@ -451,15 +588,24 @@ impl Viewer {
         }
     }
 
-    /// Draws a frame. Returns true if another should follow (animations, loading thumbnails).
+    /// Takes in what arrived and draws a frame. True if another should follow.
     fn frame(&mut self) -> bool {
-        if std::mem::take(&mut self.scripts.dirty) {
-            let roots: Vec<NodeId> = self.scripts.roots.iter().copied().collect();
-            self.rebuild(Some(roots));
-        }
+        self.pump();
+        self.draw()
+    }
+
+    /// Takes in finished downloads and script results and lays out again what they affect.
+    fn pump(&mut self) {
+        let rebuild = std::mem::take(&mut self.scripts.dirty);
         let (fonts, _) = self.renderer.poll();
-        if fonts {
-            self.relayout();
+        let (renderer, scripts, warnings) = (&mut self.renderer, &mut self.scripts, &mut self.warnings);
+        for l in self.main.iter_mut().chain(self.overlay.iter_mut().map(|(l, _)| l)).chain(self.other.iter_mut()) {
+            if rebuild {
+                l.rebuild_scripts(renderer, scripts, warnings);
+            }
+            if fonts {
+                l.relayout(renderer);
+            }
         }
         if self.ui.0.is_none() {
             // Asked again each frame: its stylesheet arriving doesn't load the font by itself.
@@ -468,6 +614,10 @@ impl Viewer {
             let tf = self.renderer.text.fonts.collection.find_typefaces(&[UI_FAMILY], FontStyle::normal());
             self.ui = UiFont(tf.into_iter().find(|t| t.family_name() == UI_FAMILY).map(|t| Font::new(t, 12.0)));
         }
+    }
+
+    /// Draws a frame. Returns true if another should follow (animations, loading thumbnails).
+    fn draw(&mut self) -> bool {
         if !self.fitted {
             self.fit(None);
         }
@@ -516,6 +666,11 @@ impl Viewer {
                 Some((outline(k)?, label))
             })
             .collect();
+        let highlights: Vec<_> = self
+            .highlights
+            .iter()
+            .map(|h| (h.color, h.keys.iter().filter_map(|k| outline(k)).collect::<Vec<_>>()))
+            .collect();
         let clock = now.duration_since(self.started).as_secs_f32();
         let controls = self.controls();
 
@@ -524,24 +679,50 @@ impl Viewer {
         canvas.clear(if self.dark { Color::from_rgb(0x1E, 0x1E, 0x20) } else { Color::from_rgb(0xEC, 0xEC, 0xEC) });
         canvas.save();
         canvas.scale((self.dpr, self.dpr));
-        if let Some(doc) = &self.doc {
+        if let Some(main) = &self.main {
             canvas.save();
             canvas.scale((cam.zoom, cam.zoom));
             canvas.translate((-cam.x, -cam.y));
             let view = View { scale: cam.zoom * self.dpr, viewport, lod: true };
             self.renderer.begin_frame();
             self.renderer.reveal = reveal;
-            for r in &doc.roots {
-                if let Some(s) = self.scenes.get(r) {
+            for s in main.ordered() {
+                self.renderer.draw_scene(canvas, s, &view);
+            }
+            if let Some((over, opacity)) = &self.overlay {
+                // Its own thumbnails and files; no draw-in animation.
+                let reveal = std::mem::take(&mut self.renderer.reveal);
+                self.renderer.layer = 1;
+                self.renderer.base_dir = over.base.clone();
+                canvas.save_layer_alpha_f(None, *opacity);
+                for s in over.ordered() {
                     self.renderer.draw_scene(canvas, s, &view);
                 }
+                canvas.restore();
+                self.renderer.layer = 0;
+                self.renderer.base_dir = main.base.clone();
+                self.renderer.reveal = reveal;
             }
             self.renderer.text.end_frame();
             canvas.restore();
 
+            for (color, quads) in &highlights {
+                let fill = Paint::new(Color4f::new(color.r, color.g, color.b, 0.12), None);
+                for q in quads {
+                    let mut b = PathBuilder::new();
+                    b.move_to(q[0]);
+                    for p in &q[1..] {
+                        b.line_to(*p);
+                    }
+                    b.close();
+                    canvas.draw_path(&b.detach(), &fill);
+                    draw_quad(canvas, q, *color, 2.0);
+                }
+            }
+
             let label = Paint::new(if self.dark { Color4f::new(0.74, 0.74, 0.77, 1.0) } else { Color4f::new(0.42, 0.42, 0.45, 1.0) }, None);
-            for r in &doc.roots {
-                let Some(n) = self.scenes.get(r).and_then(|s| s.root()) else { continue };
+            for s in main.ordered() {
+                let Some(n) = s.root() else { continue };
                 if !n.enabled || !matches!(n.kind, Kind::Frame { .. }) {
                     continue;
                 }
@@ -1042,6 +1223,64 @@ pub extern "C" fn study_touch(v: *mut Viewer, ptr: *const u8, len: usize) {
 #[unsafe(no_mangle)]
 pub extern "C" fn study_draw_in(v: *mut Viewer, ptr: *const u8, len: usize) {
     viewer(v).draw_in(keys(ptr, len));
+}
+
+/// Outlines nodes (JSON array of ids) in a highlight `kind`: `added`, `changed`, `removed` or a
+/// `#rrggbb` colour. They replace that kind's earlier ones; an empty kind with no ids clears all.
+/// False for an unknown kind.
+#[unsafe(no_mangle)]
+pub extern "C" fn study_highlight(v: *mut Viewer, kind: *const u8, kind_len: usize, ptr: *const u8, len: usize) -> bool {
+    viewer(v).highlight(&string(kind, kind_len), keys(ptr, len))
+}
+
+/// Lays out another version of the document (UTF-8 JSON at page path `path`) to compare the shown
+/// one with. Returns null, or an error. Read the result with `study_compare_result` once
+/// `study_settling` is false.
+#[unsafe(no_mangle)]
+pub extern "C" fn study_compare_start(v: *mut Viewer, ptr: *const u8, len: usize, path: *const u8, path_len: usize) -> *const c_char {
+    let v = viewer(v);
+    let text = String::from_utf8_lossy(bytes(ptr, len)).into_owned();
+    let err = v.compare_start(&text, &string(path, path_len)).err();
+    give(v, err)
+}
+
+/// Whether font downloads or script runs that could change a layout are still out.
+#[unsafe(no_mangle)]
+pub extern "C" fn study_settling(v: *mut Viewer) -> bool {
+    viewer(v).settling()
+}
+
+/// Takes in downloads and script results without drawing, for when the page has no frames (a
+/// background tab) but is waiting on them.
+#[unsafe(no_mangle)]
+pub extern "C" fn study_pump(v: *mut Viewer) {
+    viewer(v).pump();
+}
+
+/// What changed from the version given to `study_compare_start` to the shown document, as JSON
+/// `{"added", "removed", "changed": [{"id", "props", "moved", "bounds"}], "frames"}`, or null.
+#[unsafe(no_mangle)]
+pub extern "C" fn study_compare_result(v: *mut Viewer) -> *const c_char {
+    let v = viewer(v);
+    let r = v.compare_result().map(|r| r.to_string());
+    give(v, r)
+}
+
+/// Draws another document (UTF-8 JSON at page path `path`) over the shown one at `opacity`; an
+/// empty document removes it. Returns null, or an error.
+#[unsafe(no_mangle)]
+pub extern "C" fn study_set_overlay(v: *mut Viewer, ptr: *const u8, len: usize, path: *const u8, path_len: usize, opacity: f32) -> *const c_char {
+    let v = viewer(v);
+    let text = String::from_utf8_lossy(bytes(ptr, len)).into_owned();
+    let err = v.set_overlay(&text, &string(path, path_len), opacity).err();
+    give(v, err)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn study_set_overlay_opacity(v: *mut Viewer, opacity: f32) {
+    if let Some((_, o)) = &mut viewer(v).overlay {
+        *o = opacity.clamp(0.0, 1.0);
+    }
 }
 
 /// Problems since the last call (script and import failures), as a JSON array, or null.

@@ -1,4 +1,5 @@
 pub mod access;
+pub mod diff;
 pub mod doc;
 pub mod imports;
 pub mod instance;

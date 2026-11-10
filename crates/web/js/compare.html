@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>study: compare versions</title>
+<style>
+  html, body { margin: 0; height: 100%; font: 13px system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; gap: 12px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #0002; flex-wrap: wrap; }
+  #status { margin-left: auto; color: #666; }
+  main { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr 280px; grid-template-rows: minmax(0, 1fr); }
+  section { position: relative; min-width: 0; border-right: 1px solid #0002; }
+  section h2 { position: absolute; top: 8px; right: 12px; margin: 0; font-size: 12px; color: #666; pointer-events: none; z-index: 1; }
+  canvas { width: 100%; height: 100%; display: block; }
+  ul { list-style: none; margin: 0; padding: 8px; overflow: auto; }
+  li { padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+  li:hover { background: #0001; }
+  .added { color: #16A34A; } .changed { color: #B45309; } .removed { color: #DC2626; }
+  small { color: #666; display: block; }
+</style>
+</head>
+<body>
+<header>
+  <strong>Compare versions</strong>
+  <label><input type="checkbox" id="onion"> onion skin</label>
+  <input type="range" id="opacity" min="0" max="100" value="50" disabled>
+  <span id="status">Loading…</span>
+</header>
+<main>
+  <section><h2>Before</h2><canvas id="before"></canvas></section>
+  <section><h2>After</h2><canvas id="after"></canvas></section>
+  <ul id="changes"></ul>
+</main>
+<script type="module">
+  import { createViewer } from "./study-viewer.js";
+
+  const $ = (id) => document.getElementById(id);
+  const readFile = async (p) => {
+    const res = await fetch(new URL(p, location.href));
+    return res.ok ? res.arrayBuffer() : null;
+  };
+  const path = "showcase.pen";
+  const beforeText = await (await fetch(path)).text();
+
+  // The "after" version: a few edits an agent might make.
+  const after = JSON.parse(beforeText);
+  const find = (nodes, id, parent = null) => {
+    for (const n of nodes ?? []) {
+      if (n.id === id) return { node: n, parent };
+      const hit = find(n.children, id, n);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  find(after.children, "ow7vZ").node.fill = "#DBEAFE";        // in the Stat Card component: every instance changes
+  find(after.children, "234KG").node.padding = [22, 0];       // taller row: the rows below move down
+  const list = find(after.children, "234KG").parent.children;
+  list.splice(list.findIndex((n) => n.id === "234KG") + 1, 1); // remove the next habit
+  list.push({ type: "text", id: "NEWa1", name: "Added note", content: "Evening walk", fontSize: 15, fill: "#102A43" });
+  const afterText = JSON.stringify(after, null, 2);
+
+  const [before, now] = await Promise.all([createViewer($("before"), { readFile }), createViewer($("after"), { readFile })]);
+  window.viewers = { before, now };
+  await Promise.all([before.load(beforeText, { path }), now.load(afterText, { path })]);
+
+  const t0 = performance.now();
+  const diff = await now.compare(beforeText, { path });
+  window.diff = diff;
+  $("status").textContent = `${diff.added.length} added, ${diff.removed.length} removed, ${diff.changed.length} changed in ${Math.round(performance.now() - t0)} ms`;
+
+  // Outline the changes: what's new or different on the right, what's gone on the left.
+  now.highlight(diff.added, { kind: "added" });
+  now.highlight(diff.changed.map((c) => c.id), { kind: "changed" });
+  before.highlight(diff.removed, { kind: "removed" });
+  before.highlight(diff.changed.map((c) => c.id).filter((id) => before.node(id)), { kind: "changed" });
+
+  // One camera for both.
+  let syncing = false;
+  const link = (from, to) => from.addEventListener("viewchange", (e) => {
+    if (syncing) return;
+    syncing = true;
+    to.camera = e.detail.camera;
+    syncing = false;
+  });
+  link(before, now);
+  link(now, before);
+  before.fit();
+  now.camera = before.camera;
+
+  const item = (kind, id, detail, viewer) => {
+    const li = document.createElement("li");
+    const node = viewer.node(id);
+    li.innerHTML = `<span class="${kind}">${kind}</span> ${node?.name ?? id}<small></small>`;
+    li.querySelector("small").textContent = detail;
+    li.onclick = () => { viewer.select([id]); viewer.zoomTo([id]); };
+    $("changes").append(li);
+  };
+  diff.added.forEach((id) => item("added", id, id, now));
+  diff.removed.forEach((id) => item("removed", id, id, before));
+  for (const c of diff.changed) {
+    const detail = [c.props.length ? c.props.join(", ") : null, c.moved ? "moved" : null, c.bounds && !c.props.length ? "layout" : null].filter(Boolean).join(" · ");
+    item("changed", c.id, `${c.id} · ${detail}`, now);
+  }
+
+  $("onion").onchange = async (e) => {
+    $("opacity").disabled = !e.target.checked;
+    await now.setOverlay(e.target.checked ? beforeText : null, { path, opacity: $("opacity").value / 100 });
+  };
+  $("opacity").oninput = (e) => (now.overlayOpacity = e.target.value / 100);
+</script>
+</body>
+</html>

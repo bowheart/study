@@ -51,9 +51,10 @@ folder to your PATH. The exe is unsigned, so Windows SmartScreen asks once befor
 
 For servers, `study-linux-x64.tar.gz` and `study-linux-arm64.tar.gz` from the
 [latest release](https://github.com/bowheart/study/releases/latest) are the MCP server alone
-(`study mcp`), without the window. They need fontconfig and glibc 2.39+ (Ubuntu 24.04, Debian 13). Settings that confine
-agents to a workspace (`STUDY_ROOT`, `STUDY_WRITABLE`, `STUDY_FETCH_HOSTS`, `STUDY_DATA_DIR`) are
-in [crates/web/README.md](crates/web/README.md#limiting-what-agents-can-touch).
+(`study mcp`), without the window. They need fontconfig and glibc 2.39+ (Ubuntu 24.04,
+Debian 13). Settings that confine agents to a workspace (`STUDY_ROOT`, `STUDY_WRITABLE`,
+`STUDY_FETCH_HOSTS`, `STUDY_DATA_DIR`) are in
+[crates/web/README.md](crates/web/README.md#limiting-what-agents-can-touch).
 
 ### Updating
 
@@ -174,6 +175,8 @@ on them.
   run in a sandboxed worker.
 - **Interaction:** selection and hover like the desktop app, plus events and node info to build
   a toolbar on, for example "ask the AI about this".
+- **Comparing versions:** a layout-aware diff (added, removed, changed properties, reflow), node
+  highlights and an onion-skin overlay.
 - **Live agent work:** run the agents' MCP server headless:
 
   ```bash

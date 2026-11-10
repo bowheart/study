@@ -32,8 +32,8 @@ files:
 | `study-sandbox.html` | The page `script` nodes run in |
 
 Bundlers that understand `new URL(..., import.meta.url)`, such as Vite, find the files on their
-own. Otherwise pass `locateFile: (name) => "/static/study/" + name`. `dist/demo.html` shows every
-feature; serve `dist/` and open it.
+own. Otherwise pass `locateFile: (name) => "/static/study/" + name`. Serve `dist/` to try the
+demos: `demo.html` shows every feature and `compare.html` compares two versions.
 
 ## Showing a document
 
@@ -120,6 +120,7 @@ Every node is described by a `NodeInfo`:
 | `viewer.nodeJson(id)` | The node as written in the `.pen` file |
 | `viewer.snapshot(id, { scale })` | A PNG `Blob` of the node as drawn |
 | `viewer.zoomTo(ids)`, `fit()`, `zoomBy(f)`, `camera` | View control |
+| `viewer.compare(pen)`, `highlight(ids, { kind })`, `setOverlay(pen)` | See "Comparing versions" |
 
 Events come from `viewer.addEventListener(type, (e) => …)`, with data in `e.detail`:
 
@@ -176,6 +177,81 @@ ways to pass that along, and they work well together:
    `get_app_state`, the first call an agent makes, then reports that document and selection the
    same way the desktop app reports its own. Use one file per agent session.
 
+## Comparing versions
+
+To show what changed between two versions of a file, put them in two viewers side by side and
+let the newer one compare itself with the older:
+
+```js
+const before = await createViewer(leftCanvas, { readFile });
+const after = await createViewer(rightCanvas, { readFile });
+await before.load(oldText, { path });
+await after.load(newText, { path });
+
+const diff = await after.compare(oldText, { path });
+after.highlight(diff.added, { kind: "added" });                  // green
+after.highlight(diff.changed.map((c) => c.id), { kind: "changed" }); // amber
+before.highlight(diff.removed, { kind: "removed" });             // red
+
+// One camera for both.
+let syncing = false;
+const link = (a, b) => a.addEventListener("viewchange", (e) => {
+  if (syncing) return;
+  syncing = true;
+  b.camera = e.detail.camera;
+  syncing = false;
+});
+link(before, after);
+link(after, before);
+```
+
+`dist/compare.html` is this, with a list of the changes. Serve `dist/` to try it.
+
+**`compare(before, { path, timeout })`** resolves to what changed from `before` to the document
+the viewer shows, as laid out and rendered:
+
+| Field | |
+| --- | --- |
+| `added` | Ids only in the shown document. Only the outermost node of a new subtree is listed |
+| `removed` | Ids only in `before`, likewise. Highlight them in a viewer showing `before` |
+| `changed` | `{ id, props, moved, bounds }` for nodes in both that differ (below) |
+| `frames` | Top-level nodes containing any of these, for a "frames changed" summary |
+
+Each entry in `changed`:
+
+- **`props`:** the names of properties whose values differ, such as `["fill", "padding"]`.
+- **`moved`:** true if it has a different parent, or a different order among siblings that are
+  in both versions. When one node moves to the end of a list, only that node is `moved`.
+- **`bounds`:** `{ before, after }` boxes in document units, when it moved within its parent or
+  changed size, even if its own properties didn't change. A sibling pushing it down, flex giving
+  it more room, or a component change resizing it all show up here. Children that only moved
+  along with their parent aren't listed.
+
+A JSON diff misses some of what these catch:
+
+- **Matching by instance path:** nodes match by id, and inside component instances by instance
+  path (`instanceId/childId`).
+- **Instances compared as they render:** editing a component reports a change on every instance
+  where it shows. An instance that overrides that property doesn't change, so it isn't reported.
+- **Script output left out:** nodes that `script` nodes generate have no stable ids, so they're
+  skipped. The `script` node itself is compared.
+- **Waiting for fonts and scripts:** `compare` waits up to `timeout` ms (default 10000) for fonts
+  and `script` nodes, so text measures the same in both versions. It usually takes milliseconds
+  once fonts are in, and works in a background tab.
+- **Files:** `path` is where `before` is kept, for its relative files, and defaults to the shown
+  document's path. Its files are read through `readFile` like `load`'s.
+
+**`highlight(ids, { kind })`** outlines and tints nodes, apart from selection and hover:
+
+- **Kinds:** `kind` is `"added"`, `"changed"` (the default), `"removed"` or a `#rrggbb` colour.
+- **One set per kind:** calling again with the same kind replaces that set.
+- **Clearing:** `highlight([])` clears every kind; `highlight([], { kind })` clears one.
+
+**Onion skin:** `setOverlay(pen, { path, opacity })` draws another document over the shown one,
+translucent, to see exactly what shifted. `viewer.overlayOpacity = 0.3` changes the opacity
+without reloading it, for a slider, and `setOverlay(null)` removes it. The overlay isn't
+interactive: selection and hover stay on the shown document.
+
 ## Showing an agent's work live
 
 Run the agents' MCP server headless, logging what each call did:
@@ -224,10 +300,10 @@ scanner that skips dotfiles never sees a half-written file.
 ### On a Linux server
 
 Releases include `study-linux-x64.tar.gz` and `study-linux-arm64.tar.gz`, built on Ubuntu 24.04,
-so they need glibc 2.39 or newer (Ubuntu 24.04, Debian 13 and later; the Skia library study
-uses ships binaries that need it). For Docker, base the image on `ubuntu:24.04` or `debian:trixie`. Each is the MCP server
-alone, with no window, menus or updater. It never opens windows, so it doesn't need
-`STUDY_HEADLESS`.
+so they need glibc 2.39 or newer: Ubuntu 24.04, Debian 13 and later. (The Skia library study
+uses ships binaries that need it.) For Docker, base the image on `ubuntu:24.04` or
+`debian:trixie`. Each is the MCP server alone, with no window, menus or updater. It never opens
+windows, so it doesn't need `STUDY_HEADLESS`.
 
 - **Dependencies:** it needs fontconfig (`apt install libfontconfig1`).
 - **Fonts for screenshots:** screenshots use the system's fonts for characters a document's
