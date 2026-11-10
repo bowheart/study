@@ -19,6 +19,8 @@ const toBytes = (data) =>
   : data instanceof ArrayBuffer ? new Uint8Array(data)
   : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
   : encoder.encode(JSON.stringify(data));
+/** The exports' side argument: 1 for the changes layout's `before`, 0 for the shown document. */
+const sideArg = (side) => (side === "before" ? 1 : 0);
 
 /**
  * @typedef {object} NodeInfo
@@ -29,9 +31,12 @@ const toBytes = (data) =>
  * @property {string|null} parent Id of the parent node (null for top-level frames)
  * @property {string|null} root Id of the top-level frame it's in
  * @property {string|null} instance Id of the component instance it's inside, if any
+ * @property {"after"|"before"} side Which version it's in: `before` only for the older version in
+ *   the changes layout (`showChanges`)
  * @property {{x:number,y:number,width:number,height:number}} bounds In document units
- * @property {{x:number,y:number,width:number,height:number}} screen In CSS pixels from the
- *   canvas's top-left corner: where to anchor a toolbar
+ * @property {{x:number,y:number,width:number,height:number}|null} screen In CSS pixels from the
+ *   canvas's top-left corner: where to anchor a toolbar. Null in the changes layout when its
+ *   frame isn't one of the rows.
  */
 
 /**
@@ -77,6 +82,8 @@ export async function createViewer(canvas, options = {}) {
  *   toolbar attached.
  * - `warning` `{message}`: a script node failed, an import or file is missing, ...
  * - `themechange` `{theme}`: the built-in light/dark switch was clicked (`"light"` or `"dark"`).
+ * - `layoutchange` `{rows}`: the changes layout's rows changed size, place or content (a `load`,
+ *   fonts or scripts arriving, a resize, new options). Scrolling fires `viewchange` instead.
  */
 export class Viewer extends EventTarget {
   #m;
@@ -92,6 +99,10 @@ export class Viewer extends EventTarget {
   #loads = 0;
   #path = "document.pen";
   #compares = Promise.resolve();
+  #changes = null;
+  #changeOptions = null;
+  #changeLoads = 0;
+  #rowsVersion = 0;
   #sandbox = null;
   #theme = "system";
   #controls = { breadcrumb: true, zoom: true, theme: true };
@@ -130,7 +141,7 @@ export class Viewer extends EventTarget {
     const bytes = toBytes(pen);
     const ticket = ++this.#loads;
     if (!(await this.#provideFiles(bytes, path, () => ticket === this.#loads))) return;
-    const before = this.#selectionIds();
+    const before = this.#selectionKey();
     const err = this.#withBytes(bytes, (p, n) => this.#withBytes(path, (pp, pn) => this.#m._study_load(this.#v, p, n, pp, pn)));
     this.redraw();
     if (err) throw new Error(this.#m.UTF8ToString(err));
@@ -184,14 +195,7 @@ export class Viewer extends EventTarget {
       if (this.#destroyed) throw new Error("study: viewer destroyed");
       const err = this.#withBytes(bytes, (p, n) => this.#withBytes(path, (pp, pn) => this.#m._study_compare_start(this.#v, p, n, pp, pn)));
       if (err) throw new Error(this.#m.UTF8ToString(err));
-      const until = performance.now() + timeout;
-      while (this.#m._study_settling(this.#v) && performance.now() < until && !this.#destroyed) {
-        // Not through frames: a background tab gets none.
-        this.#m._study_pump(this.#v);
-        this.#startDownloads();
-        this.#startScripts();
-        await new Promise((r) => setTimeout(r, 30));
-      }
+      await this.#settle(timeout);
       return this.#json(this.#m._study_compare_result(this.#v));
     };
     const result = this.#compares.then(run, run);
@@ -216,49 +220,147 @@ export class Viewer extends EventTarget {
     this.redraw();
   }
 
-  /** The overlay's opacity, 0–1. */
+  /** The overlay's opacity, 0–1 (also the changes layout's onion opacity). */
   set overlayOpacity(opacity) {
     this.#m._study_set_overlay_opacity(this.#v, opacity);
+    if (this.#changeOptions) this.#changeOptions.opacity = opacity;
     this.redraw();
   }
+
+  /**
+   * @typedef {object} ChangeRow
+   * @property {string} id The top-level node's id
+   * @property {string|null} name
+   * @property {"added"|"changed"|"removed"|"unchanged"} kind `unchanged` only for frames you
+   *   asked for in `frames` that didn't change
+   * @property {string[]} props The frame's own properties that differ
+   * @property {boolean} moved The frame changed order among the top-level nodes
+   * @property {{x:number,y:number,width:number,height:number}|null} before Where the older
+   *   version is drawn, in CSS px from the canvas's top-left (null if it's new)
+   * @property {{x:number,y:number,width:number,height:number}|null} after Where the shown version
+   *   is drawn (null if it was removed)
+   * @property {{x:number,y:number,width:number,height:number}} bounds The whole row, both sides
+   */
+
+  /**
+   * Shows only the top-level frames that differ from another version, one row each, laid out by
+   * the viewer in one canvas: `before` on the left and the shown document on the right, at the same
+   * scale (`mode: "onion"`: one column, `before` drawn over the shown version at `opacity`). Both
+   * versions load fully and once, so variables, components, imports, fonts and scripts resolve
+   * as usual, and ids are the documents' own. Changed and added nodes are outlined on the right,
+   * removed ones on the left. Scrolling and zooming move all rows together. Hover and selection
+   * work on both sides (`NodeInfo.side` says which); in the onion mode, on the shown version only.
+   *
+   * It stays until `showChanges(null)`; `load` of a newer version recomputes the rows, and so do
+   * fonts and scripts arriving (`layoutchange`). Resolves once fonts and scripts have settled (or
+   * after `timeout` ms).
+   *
+   * @param {object} [options]
+   * @param {string} [options.path] Where `before` is kept, for its relative files (default: the
+   *   shown document's)
+   * @param {string[]} [options.frames] Top-level ids to show (default: every frame `compare`
+   *   reports), in document order either way
+   * @param {"side"|"onion"} [options.mode="side"]
+   * @param {number} [options.opacity=0.5] The onion mode's `before` opacity
+   * @param {"width"|"contain"} [options.fit="width"] `width`: each row fills the column width;
+   *   `contain`: also no taller than `maxRowHeight` (default: the canvas height)
+   * @param {number} [options.maxRowHeight] Rows taller than this (CSS px) are scaled down
+   * @param {number} [options.gap=32] Between rows (room for your row headers)
+   * @param {number} [options.gutter=24] Between the two sides
+   * @param {number} [options.padding=24] Around the rows
+   * @param {{added?: string, changed?: string, removed?: string}} [options.colors] `#rrggbb`
+   * @returns {Promise<ChangesView|null>}
+   */
+  async showChanges(before, options = {}) {
+    const ticket = ++this.#changeLoads;
+    if (before == null) {
+      this.#m._study_hide_changes(this.#v);
+      this.#changes = null;
+      this.#changeOptions = null;
+      this.#rowsVersion = 0;
+      this.#emitIfSelectionChanged(this.#selectionKey());
+      this.redraw();
+      return null;
+    }
+    const { path = this.#path, timeout = 10000, ...opts } = options;
+    const bytes = toBytes(before);
+    if (!(await this.#provideFiles(bytes, path, () => ticket === this.#changeLoads)) || this.#destroyed) return this.#changes;
+    const selection = this.#selectionKey();
+    const err = this.#withBytes(bytes, (p, n) => this.#withBytes(path, (pp, pn) => this.#withBytes(JSON.stringify(opts), (op, on) =>
+      this.#m._study_show_changes(this.#v, p, n, pp, pn, op, on))));
+    if (err) throw new Error(this.#m.UTF8ToString(err));
+    this.#changeOptions = { ...opts };
+    this.#changes ??= new ChangesView({
+      rows: () => this.#json(this.#m._study_changes_rows(this.#v)) ?? [],
+      rowAt: (x, y) => this.#json(this.#m._study_row_at(this.#v, x, y)),
+      scrollToRow: (id) => {
+        const ok = !!this.#withBytes(id, (p, n) => this.#m._study_scroll_to_row(this.#v, p, n));
+        this.redraw();
+        return ok;
+      },
+      options: () => ({ ...this.#changeOptions }),
+      setOptions: (more) => {
+        const next = { ...this.#changeOptions, ...more };
+        const err = this.#withBytes(JSON.stringify(next), (p, n) => this.#m._study_changes_options(this.#v, p, n));
+        if (err) throw new Error(this.#m.UTF8ToString(err));
+        const before = this.#selectionKey();
+        this.#changeOptions = next;
+        this.redraw();
+        this.#emitIfSelectionChanged(before);
+      },
+      close: () => this.showChanges(null),
+      active: (view) => this.#changes === view,
+    });
+    this.#emitIfSelectionChanged(selection);
+    this.redraw();
+    await this.#settle(timeout);
+    return this.#changes;
+  }
+
+  /** The changes layout, while it's shown. @returns {ChangesView|null} */
+  get changes() { return this.#changes; }
 
   // ---------------------------------------------------------------- selection and nodes
 
   /** @returns {NodeInfo[]} */
   get selection() {
-    return this.#selectionIds().map((id) => this.node(id)).filter(Boolean);
+    const { ids, side } = this.#selectionState();
+    return ids.map((id) => this.node(id, { side })).filter(Boolean);
   }
 
-  /** Selects nodes by id (an empty list clears the selection). */
-  select(ids) {
-    const before = this.#selectionIds();
-    this.#withBytes(JSON.stringify(ids ?? []), (p, n) => this.#m._study_select(this.#v, p, n));
+  /**
+   * Selects nodes by id (an empty list clears the selection). In the changes layout, `side:
+   * "before"` selects in the older version.
+   */
+  select(ids, { side = "after" } = {}) {
+    const before = this.#selectionKey();
+    this.#withBytes(JSON.stringify(ids ?? []), (p, n) => this.#m._study_select(this.#v, p, n, sideArg(side)));
     this.redraw();
     this.#emitIfSelectionChanged(before);
   }
 
-  /** @returns {NodeInfo|null} */
-  node(id) {
-    return this.#json(this.#withBytes(id, (p, n) => this.#m._study_node_info(this.#v, p, n)));
+  /** `side: "before"`: the node in the changes layout's older version. @returns {NodeInfo|null} */
+  node(id, { side = "after" } = {}) {
+    return this.#json(this.#withBytes(id, (p, n) => this.#m._study_node_info(this.#v, p, n, sideArg(side))));
   }
 
   /** The node under a point in CSS pixels from the canvas's corner. @returns {NodeInfo|null} */
   nodeAt(x, y) {
-    const id = this.#str(this.#m._study_hit(this.#v, x, y));
-    return id ? this.node(id) : null;
+    const hit = this.#json(this.#m._study_hit(this.#v, x, y));
+    return hit ? this.node(hit.id, hit) : null;
   }
 
   /** The node's JSON as written in the .pen file (inside an instance: the component's node). */
-  nodeJson(id) {
-    return this.#json(this.#withBytes(id, (p, n) => this.#m._study_node_json(this.#v, p, n)));
+  nodeJson(id, { side = "after" } = {}) {
+    return this.#json(this.#withBytes(id, (p, n) => this.#m._study_node_json(this.#v, p, n, sideArg(side))));
   }
 
   /**
    * A PNG of the node as drawn (like the MCP screenshot tool: longest edge ≤ 1568 px, at most
    * 2× scale), for giving an agent visual context. @returns {Blob|null}
    */
-  snapshot(id, { scale = 0 } = {}) {
-    const ok = this.#withBytes(id, (p, n) => this.#m._study_snapshot(this.#v, p, n, scale));
+  snapshot(id, { scale = 0, side = "after" } = {}) {
+    const ok = this.#withBytes(id, (p, n) => this.#m._study_snapshot(this.#v, p, n, scale, sideArg(side)));
     if (!ok) return null;
     const ptr = this.#m._study_blob_ptr(this.#v);
     const len = this.#m._study_blob_len(this.#v);
@@ -404,13 +506,28 @@ export class Viewer extends EventTarget {
     return true;
   }
 
+  /** Waits up to `timeout` ms for fonts and script runs that could change a layout. */
+  async #settle(timeout) {
+    const until = performance.now() + timeout;
+    while (this.#m._study_settling(this.#v) && performance.now() < until && !this.#destroyed) {
+      // Not through frames: a background tab gets none.
+      this.#m._study_pump(this.#v);
+      this.#startDownloads();
+      this.#startScripts();
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    if (!this.#destroyed) this.#m._study_pump(this.#v);
+  }
+
   #str(ptr) { return ptr ? this.#m.UTF8ToString(ptr) : null; }
   #json(ptr) { return ptr ? JSON.parse(this.#m.UTF8ToString(ptr)) : null; }
-  #selectionIds() { return this.#json(this.#m._study_selection(this.#v)) ?? []; }
+  /** `{ids, side}`: the selection is on one side of the changes layout at a time. */
+  #selectionState() { return this.#json(this.#m._study_selection(this.#v)) ?? { ids: [], side: "after" }; }
+  #selectionIds() { return this.#selectionState().ids; }
+  #selectionKey() { return this.#str(this.#m._study_selection(this.#v)); }
 
   #emitIfSelectionChanged(before) {
-    const after = this.#selectionIds();
-    if (after.length === before.length && after.every((id, i) => id === before[i])) return;
+    if (this.#selectionKey() === before) return;
     this.dispatchEvent(new CustomEvent("select", { detail: { nodes: this.selection } }));
   }
 
@@ -431,6 +548,11 @@ export class Viewer extends EventTarget {
     if (camera !== this.#camera) {
       this.#camera = camera;
       this.dispatchEvent(new CustomEvent("viewchange", { detail: { camera: JSON.parse(camera) } }));
+    }
+    const version = this.#m._study_changes_version(this.#v);
+    if (this.#changes && version !== this.#rowsVersion) {
+      this.#rowsVersion = version;
+      this.dispatchEvent(new CustomEvent("layoutchange", { detail: { rows: this.#changes.rows } }));
     }
   }
 
@@ -508,7 +630,7 @@ export class Viewer extends EventTarget {
 
   /** A click on a built-in control: the viewer acts, then the page hears about it. */
   #pressControl(x, y) {
-    const before = this.#selectionIds();
+    const before = this.#selectionKey();
     const what = this.#json(this.#m._study_press(this.#v, x, y));
     this.redraw();
     if (what?.control === "breadcrumb") this.#emitIfSelectionChanged(before);
@@ -587,8 +709,8 @@ export class Viewer extends EventTarget {
         return;
       }
       if (this.#m._study_pointer(this.#v, x, y, interactive())) {
-        const id = this.#str(this.#m._study_hovered(this.#v));
-        this.dispatchEvent(new CustomEvent("hover", { detail: { node: id ? this.node(id) : null } }));
+        const h = this.#json(this.#m._study_hovered(this.#v));
+        this.dispatchEvent(new CustomEvent("hover", { detail: { node: h ? this.node(h.id, h) : null } }));
       }
       c.style.cursor = this.#m._study_over_control(this.#v) ? "pointer" : "";
       this.redraw();
@@ -614,7 +736,7 @@ export class Viewer extends EventTarget {
       const node = this.nodeAt(x, y);
       const ev = new CustomEvent("nodeclick", { cancelable: true, detail: { node, x, y, event: e } });
       if (!this.dispatchEvent(ev)) return;
-      const before = this.#selectionIds();
+      const before = this.#selectionKey();
       this.#m._study_click(this.#v, x, y, e.shiftKey);
       this.redraw();
       this.#emitIfSelectionChanged(before);
@@ -627,7 +749,8 @@ export class Viewer extends EventTarget {
       const [x, y] = local(e);
       if (this.#m._study_on_controls(this.#v, x, y)) return;
       const node = this.nodeAt(x, y);
-      if (node && !this.#selectionIds().includes(node.id)) this.select([node.id]);
+      const sel = this.#selectionState();
+      if (node && !(sel.side === node.side && sel.ids.includes(node.id))) this.select([node.id], node);
       this.dispatchEvent(new CustomEvent("nodecontextmenu", { detail: { node, x, y, event: e } }));
     });
 
@@ -637,7 +760,7 @@ export class Viewer extends EventTarget {
     on(c, "keydown", (e) => {
       if (!interactive()) return;
       const mod = e.ctrlKey || e.metaKey;
-      const before = this.#selectionIds();
+      const before = this.#selectionKey();
       if (e.key === "Escape") this.select([]);
       else if (e.key === "Enter") {
         this.#m._study_select_relative(this.#v, e.shiftKey);
@@ -645,10 +768,55 @@ export class Viewer extends EventTarget {
         this.#emitIfSelectionChanged(before);
       } else if (mod && e.key === "0") this.fit();
       else if (mod && e.key === "1") this.zoomBy(1 / this.zoom);
-      else if (mod && e.key === "2") this.zoomTo(before);
+      else if (mod && e.key === "2") this.zoomTo(this.#selectionIds());
       else return;
       e.preventDefault();
     });
     c.style.touchAction = "none";
   }
+}
+
+/**
+ * The changes layout of a viewer (`viewer.showChanges`). Row geometry is in CSS px from the
+ * canvas's top-left and moves with the camera: re-read `rows` on `viewchange` and
+ * `layoutchange` to keep your row headers in place.
+ */
+export class ChangesView {
+  #api;
+
+  /** @hideconstructor */
+  constructor(api) {
+    this.#api = api;
+  }
+
+  /** @returns {ChangeRow[]} In document order. */
+  get rows() { return this.#active() ? this.#api.rows() : []; }
+
+  /**
+   * The row at a point in CSS px, with `side` (`"before"`/`"after"`; null in the onion mode).
+   * Includes the gap above and below it. @returns {(ChangeRow & {side: string|null})|null}
+   */
+  rowAt(x, y) { return this.#active() ? this.#api.rowAt(x, y) : null; }
+
+  /** Scrolls a row to the top. False if there's no row for that id. */
+  scrollToRow(id) { return this.#active() && this.#api.scrollToRow(id); }
+
+  /** `"side"` or `"onion"`. */
+  get mode() { return this.options.mode ?? "side"; }
+
+  /** The options in effect (as passed to `showChanges`, with later `setOptions`). */
+  get options() { return this.#active() ? this.#api.options() : {}; }
+
+  /**
+   * Changes options without loading `before` again: `mode`, `opacity`, `fit`, `maxRowHeight`,
+   * `gap`, `gutter`, `padding`, `frames`, `colors`. Missing ones keep their values.
+   */
+  setOptions(options) {
+    if (this.#active()) this.#api.setOptions(options);
+  }
+
+  /** Back to the whole document (`viewer.showChanges(null)`). */
+  close() { return this.#active() ? this.#api.close() : Promise.resolve(null); }
+
+  #active() { return this.#api.active(this); }
 }

@@ -175,8 +175,8 @@ on them.
   run in a sandboxed worker.
 - **Interaction:** selection and hover like the desktop app, plus events and node info to build
   a toolbar on, for example "ask the AI about this".
-- **Comparing versions:** a layout-aware diff (added, removed, changed properties, reflow), node
-  highlights and an onion-skin overlay.
+- **Comparing versions:** a layout-aware diff (added, removed, changed properties, reflow), a
+  view of only the frames that changed, side by side, node highlights and an onion-skin overlay.
 - **Live agent work:** run the agents' MCP server headless:
 
   ```bash

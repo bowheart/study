@@ -7,6 +7,10 @@
 //! evaluated by the page in a sandboxed worker: `study_script_jobs` hands out the wrapped code and
 //! `study_script_result` brings the output back.
 
+#[path = "changes.rs"]
+mod changes;
+
+use changes::{Changes, Side};
 use pen::imports::Imports;
 use pen::layout::{compute_bounds, layout};
 use pen::scene::{compile_root_with, graft, Kind, Rect, RootScene, NONE};
@@ -212,6 +216,8 @@ pub struct Viewer {
     /// The other version while `compare` waits for its fonts and scripts.
     other: Option<Layer>,
     highlights: Vec<Highlight>,
+    /// The changes layout (`showChanges`): rows of frames that differ from another version.
+    changes: Option<Changes>,
     renderer: Renderer,
     scripts: ScriptRuns,
     /// Problems to report to the page (script and import failures).
@@ -223,8 +229,10 @@ pub struct Viewer {
     anims: Vec<(String, Instant, f32)>,
     scans: Vec<(String, Instant)>,
     working: HashMap<String, (Instant, Instant)>,
+    /// Selected nodes, all on one side: the shown document, or the changes layout's `before`.
     selection: Vec<String>,
-    hover: Option<String>,
+    sel_side: Side,
+    hover: Option<(String, Side)>,
     /// Built-in controls to show, and the one under the pointer.
     show: Show,
     ctrl_hover: Option<Control>,
@@ -256,6 +264,7 @@ impl Viewer {
             overlay: None,
             other: None,
             highlights: Vec::new(),
+            changes: None,
             renderer,
             scripts: ScriptRuns::default(),
             warnings: Vec::new(),
@@ -267,6 +276,7 @@ impl Viewer {
             scans: Vec::new(),
             working: HashMap::new(),
             selection: Vec::new(),
+            sel_side: Side::After,
             hover: None,
             show: Show::default(),
             ctrl_hover: None,
@@ -278,8 +288,13 @@ impl Viewer {
 
     fn resize(&mut self, w: i32, h: i32, dpr: f32) {
         self.surface = make_surface(&mut self.gr, self.fb, w, h);
-        self.size = (w as f32 / dpr, h as f32 / dpr);
+        let size = (w as f32 / dpr, h as f32 / dpr);
+        let resized = size != self.size;
+        self.size = size;
         self.dpr = dpr;
+        if resized {
+            self.place_rows();
+        }
     }
 
     /// Replaces the document; `path` is where the page keeps it (relative files resolve from
@@ -289,9 +304,10 @@ impl Viewer {
         layer.build(None, &mut self.renderer, &mut self.scripts, &mut self.warnings);
         self.renderer.base_dir = layer.base.clone();
         self.main = Some(layer);
+        self.refresh_changes();
         let selection = std::mem::take(&mut self.selection);
-        self.selection = selection.into_iter().filter(|k| self.locate(k).is_some()).collect();
-        if self.hover.as_ref().is_some_and(|k| self.locate(k).is_none()) {
+        self.selection = selection.into_iter().filter(|k| self.locate_on(self.sel_side, k).is_some()).collect();
+        if self.hover.as_ref().is_some_and(|(k, side)| self.locate_on(*side, k).is_none()) {
             self.hover = None;
         }
         Ok(())
@@ -365,6 +381,9 @@ impl Viewer {
     }
 
     fn fit(&mut self, r: Option<Rect>) {
+        if self.changes.is_some() {
+            return self.fit_rows(r);
+        }
         let Some(r) = r.or_else(|| self.bounds()) else { return };
         let (w, h) = self.size;
         let margin = 48.0;
@@ -377,6 +396,7 @@ impl Viewer {
         let (dx, dy) = (self.cam.x + sx / self.cam.zoom, self.cam.y + sy / self.cam.zoom);
         let zoom = (self.cam.zoom * factor).clamp(0.001, 256.0);
         self.cam = Camera { x: dx - sx / zoom, y: dy - sy / zoom, zoom };
+        self.clamp_cam();
     }
 
     fn viewport(&self) -> Rect {
@@ -388,40 +408,42 @@ impl Viewer {
         self.main.as_ref()?.locate(key)
     }
 
-    fn abs_rect(&self, key: &str) -> Option<Rect> {
-        let (s, i) = self.locate(key)?;
-        Some(s.abs_rect(i))
-    }
-
-    /// A node's corners in document space (rotation included).
-    fn corners(&self, key: &str) -> Option<[(f32, f32); 4]> {
-        let (s, i) = self.locate(key)?;
+    /// A node's corners in its document's space (rotation included).
+    fn corners(&self, side: Side, key: &str) -> Option<[(f32, f32); 4]> {
+        let (s, i) = self.locate_on(side, key)?;
         let (m, w, h) = s.transform(i);
         Some([m.map(0.0, 0.0), m.map(w, 0.0), m.map(w, h), m.map(0.0, h)])
     }
 
-    /// Bounding box of a node in document space, rotation included.
-    fn doc_box(&self, key: &str) -> Option<Rect> {
-        let pts = self.corners(key)?;
+    /// Bounding box of a node in its document's space, rotation included.
+    fn doc_box(&self, side: Side, key: &str) -> Option<Rect> {
+        let pts = self.corners(side, key)?;
         let (l, t) = pts.iter().fold((f32::MAX, f32::MAX), |a, p| (a.0.min(p.0), a.1.min(p.1)));
         let (r, b) = pts.iter().fold((f32::MIN, f32::MIN), |a, p| (a.0.max(p.0), a.1.max(p.1)));
         Some(Rect::new(l, t, r - l, b - t))
     }
 
-    fn to_screen(&self, x: f32, y: f32) -> (f32, f32) {
-        ((x - self.cam.x) * self.cam.zoom, (y - self.cam.y) * self.cam.zoom)
-    }
-
-    /// Deepest selectable node under a point in CSS pixels.
-    fn hit(&self, sx: f32, sy: f32) -> Option<String> {
+    /// Deepest selectable node under a point in CSS pixels, and which version it's in.
+    fn hit(&self, sx: f32, sy: f32) -> Option<(String, Side)> {
+        if self.changes.is_some() {
+            return self.hit_rows(sx, sy);
+        }
         let main = self.main.as_ref()?;
         let (x, y) = (self.cam.x + sx / self.cam.zoom, self.cam.y + sy / self.cam.zoom);
-        main.ordered().into_iter().rev().find_map(|s| s.hit(x, y).map(|i| s.nodes[i as usize].key().to_string()))
+        main.ordered().into_iter().rev().find_map(|s| s.hit(x, y).map(|i| (s.nodes[i as usize].key().to_string(), Side::After)))
     }
 
-    /// The desktop's click: select what's under the point (`toggle` adds/removes it).
+    /// The desktop's click: select what's under the point (`toggle` adds/removes it). The
+    /// selection stays on one side of the changes layout: a click on the other side replaces it.
     fn click(&mut self, sx: f32, sy: f32, toggle: bool) {
-        match (self.hit(sx, sy), toggle) {
+        let hit = self.hit(sx, sy);
+        if let Some((_, side)) = &hit {
+            if *side != self.sel_side {
+                self.selection.clear();
+                self.sel_side = *side;
+            }
+        }
+        match (hit.map(|h| h.0), toggle) {
             (Some(k), true) => match self.selection.iter().position(|s| *s == k) {
                 Some(i) => {
                     self.selection.remove(i);
@@ -438,7 +460,7 @@ impl Viewer {
     fn select_relative(&mut self, up: bool) {
         let mut next = Vec::new();
         for k in &self.selection {
-            let Some((s, i)) = self.locate(k) else { continue };
+            let Some((s, i)) = self.locate_on(self.sel_side, k) else { continue };
             let n = &s.nodes[i as usize];
             let target = if up {
                 (n.parent != NONE).then(|| s.nodes[n.parent as usize].key().to_string())
@@ -452,13 +474,16 @@ impl Viewer {
     }
 
     /// What the page needs to know about a node: identity, place in the tree, and where it is.
-    fn node_info(&self, key: &str) -> Option<Value> {
-        let doc = &self.main.as_ref()?.doc;
-        let (s, i) = self.locate(key)?;
+    fn node_info(&self, key: &str, side: Side) -> Option<Value> {
+        let doc = &self.layer(side)?.doc;
+        let (s, i) = self.locate_on(side, key)?;
         let n = &s.nodes[i as usize];
-        let b = self.doc_box(key)?;
-        let (sx, sy) = self.to_screen(b.x, b.y);
-        let z = self.cam.zoom;
+        let b = self.doc_box(side, key)?;
+        // Not drawn in the changes layout when its frame has no row.
+        let screen = self.doc_xf(side, key).map(|xf| {
+            let r = xf.rect(b);
+            json!({"x": r.x, "y": r.y, "width": r.w, "height": r.h})
+        });
         // Nodes from imported files have no source in this document; their compiled kind says.
         let ty = n.src.map(|src| doc.node(src).ty().to_string()).unwrap_or_else(|| kind_name(&n.kind).into());
         let parent = (n.parent != NONE).then(|| s.nodes[n.parent as usize].key().to_string());
@@ -471,31 +496,39 @@ impl Viewer {
             "parent": parent,
             "root": root,
             "instance": component,
+            "side": side.name(),
             "bounds": {"x": b.x, "y": b.y, "width": b.w, "height": b.h},
-            "screen": {"x": sx, "y": sy, "width": b.w * z, "height": b.h * z},
+            "screen": screen,
         }))
     }
 
     /// The node's own JSON from the document (inside an instance: the component's node).
-    fn node_json(&self, key: &str) -> Option<Value> {
-        let doc = &self.main.as_ref()?.doc;
-        let (s, i) = self.locate(key)?;
+    fn node_json(&self, key: &str, side: Side) -> Option<Value> {
+        let doc = &self.layer(side)?.doc;
+        let (s, i) = self.locate_on(side, key)?;
         Some(doc.to_value(s.nodes[i as usize].src?))
     }
 
     /// PNG of a node and what's drawn over it, like the MCP screenshot tool.
-    fn snapshot(&mut self, key: &str, scale: Option<f32>) -> Option<Vec<u8>> {
-        let region = self.doc_box(key)?;
+    fn snapshot(&mut self, key: &str, scale: Option<f32>, side: Side) -> Option<Vec<u8>> {
+        let region = self.doc_box(side, key)?;
         let scale = scale.unwrap_or((SNAPSHOT_EDGE / region.w.max(region.h)).min(2.0));
-        let main = self.main.as_ref()?;
-        let scenes = main.ordered();
-        let img = render::offscreen::render_region(&mut self.renderer, &scenes, region, scale, None)?;
-        render::offscreen::encode(&img, "png", None)
+        let layer = match side {
+            Side::After => self.main.as_ref()?,
+            Side::Before => &self.changes.as_ref()?.before,
+        };
+        let scenes = layer.ordered();
+        let base = std::mem::replace(&mut self.renderer.base_dir, layer.base.clone());
+        self.renderer.layer = 3;
+        let img = render::offscreen::render_region(&mut self.renderer, &scenes, region, scale, None);
+        self.renderer.layer = 0;
+        self.renderer.base_dir = base;
+        render::offscreen::encode(&img?, "png", None)
     }
 
     /// The last selected node and its ancestors, for the breadcrumb.
     fn crumbs(&self) -> Vec<Crumb> {
-        let Some((s, i)) = self.selection.last().and_then(|k| self.locate(k)) else { return Vec::new() };
+        let Some((s, i)) = self.selection.last().and_then(|k| self.locate_on(self.sel_side, k)) else { return Vec::new() };
         s.ancestors(i)
             .into_iter()
             .map(|a| {
@@ -542,9 +575,8 @@ impl Viewer {
 
     /// Nodes an agent read: a scan line sweeps each, staggered.
     fn scan(&mut self, mut keys: Vec<String>) {
-        let view = self.viewport();
         let mut seen = HashSet::new();
-        keys.retain(|k| seen.insert(k.clone()) && self.abs_rect(k).is_some_and(|r| r.intersects(&view)));
+        keys.retain(|k| seen.insert(k.clone()) && self.on_screen(Side::After, k));
         let now = Instant::now();
         for (i, key) in keys.into_iter().take(24).enumerate() {
             self.scans.push((key, now + Duration::from_millis(140 * i as u64)));
@@ -565,14 +597,13 @@ impl Viewer {
 
     /// Paths an agent created: the pen draws them in, one after another.
     fn draw_in(&mut self, keys: Vec<String>) {
-        let view = self.viewport();
-        let zoom = self.cam.zoom;
+        let screen = Rect::new(0.0, 0.0, self.size.0, self.size.1);
         let items: Vec<(String, f32)> = keys
             .into_iter()
             .filter_map(|k| {
-                let r = self.abs_rect(&k)?;
-                let px = (r.w + r.h) * zoom;
-                (r.intersects(&view) && px > 2.0).then(|| (k, (0.3 + px / 900.0).clamp(0.3, 1.1)))
+                let r = self.screen_box(Side::After, &k)?;
+                let px = r.w + r.h;
+                (r.intersects(&screen) && px > 2.0).then(|| (k, (0.3 + px / 900.0).clamp(0.3, 1.1)))
             })
             .collect();
         let total: f32 = items.iter().map(|(_, d)| d * 0.7).sum();
@@ -599,13 +630,17 @@ impl Viewer {
         let rebuild = std::mem::take(&mut self.scripts.dirty);
         let (fonts, _) = self.renderer.poll();
         let (renderer, scripts, warnings) = (&mut self.renderer, &mut self.scripts, &mut self.warnings);
-        for l in self.main.iter_mut().chain(self.overlay.iter_mut().map(|(l, _)| l)).chain(self.other.iter_mut()) {
+        let layers = self.main.iter_mut().chain(self.overlay.iter_mut().map(|(l, _)| l)).chain(self.other.iter_mut()).chain(self.changes.iter_mut().map(|c| &mut c.before));
+        for l in layers {
             if rebuild {
                 l.rebuild_scripts(renderer, scripts, warnings);
             }
             if fonts {
                 l.relayout(renderer);
             }
+        }
+        if rebuild || fonts {
+            self.refresh_changes();
         }
         if self.ui.0.is_none() {
             // Asked again each frame: its stylesheet arriving doesn't load the font by itself.
@@ -624,7 +659,7 @@ impl Viewer {
         let now = Instant::now();
         let cam = self.cam;
         let (ww, wh) = self.size;
-        let to_screen = |r: Rect| skia_safe::Rect::from_xywh((r.x - cam.x) * cam.zoom, (r.y - cam.y) * cam.zoom, r.w * cam.zoom, r.h * cam.zoom);
+        let sk = |r: Rect| skia_safe::Rect::from_xywh(r.x, r.y, r.w, r.h);
 
         self.anims.retain(|(_, s, d)| now < *s + Duration::from_secs_f32(*d));
         let mut reveal: HashMap<u32, HashMap<u32, f32>> = HashMap::new();
@@ -639,7 +674,7 @@ impl Viewer {
             .scans
             .iter()
             .filter(|(_, s)| now >= *s)
-            .filter_map(|(k, s)| Some((to_screen(self.doc_box(k)?), (now - *s).as_secs_f32() / SCAN_SECS)))
+            .filter_map(|(k, s)| Some((sk(self.screen_box(Side::After, k)?), (now - *s).as_secs_f32() / SCAN_SECS)))
             .collect();
         self.working.retain(|_, (_, last)| now.duration_since(*last).as_secs_f32() < WORK_HOLD + WORK_FADE);
         let glows: Vec<_> = self
@@ -647,30 +682,28 @@ impl Viewer {
             .iter()
             .filter_map(|(k, (first, last))| {
                 let (s, i) = self.locate(k)?;
+                let xf = self.doc_xf(Side::After, k)?;
                 let fade_in = (now.duration_since(*first).as_secs_f32() / 0.4).min(1.0);
                 let idle = now.duration_since(*last).as_secs_f32();
                 let fade_out = 1.0 - ((idle - WORK_HOLD) / WORK_FADE).clamp(0.0, 1.0);
-                Some((to_screen(s.abs_rect(i)), s.nodes[i as usize].radius[0] * cam.zoom, fade_in * fade_out))
+                Some((sk(xf.rect(s.abs_rect(i))), s.nodes[i as usize].radius[0] * xf.scale(), fade_in * fade_out))
             })
             .collect();
         // Selection and hover outlines, in screen space, with the selection's name and size.
-        let outline = |key: &str| -> Option<[(f32, f32); 4]> { Some(self.corners(key)?.map(|(x, y)| ((x - cam.x) * cam.zoom, (y - cam.y) * cam.zoom))) };
-        let hover = self.hover.as_ref().filter(|h| !self.selection.contains(h)).and_then(|h| outline(h));
+        let side = self.sel_side;
+        let hover = self.hover.as_ref().filter(|(h, s)| !(*s == side && self.selection.contains(h))).and_then(|(h, s)| self.screen_corners(*s, h));
         let selected: Vec<_> = self
             .selection
             .iter()
             .filter_map(|k| {
-                let (s, i) = self.locate(k)?;
+                let (s, i) = self.locate_on(side, k)?;
                 let n = &s.nodes[i as usize];
                 let label = format!("{}  {}×{}", n.name.as_deref().unwrap_or(&n.id), n.rect.w.round(), n.rect.h.round());
-                Some((outline(k)?, label))
+                Some((self.screen_corners(side, k)?, label))
             })
             .collect();
-        let highlights: Vec<_> = self
-            .highlights
-            .iter()
-            .map(|h| (h.color, h.keys.iter().filter_map(|k| outline(k)).collect::<Vec<_>>()))
-            .collect();
+        let mut highlights = self.change_marks();
+        highlights.extend(self.highlights.iter().map(|h| (h.color, h.keys.iter().filter_map(|k| self.screen_corners(Side::After, k)).collect::<Vec<_>>())));
         let clock = now.duration_since(self.started).as_secs_f32();
         let controls = self.controls();
 
@@ -680,31 +713,35 @@ impl Viewer {
         canvas.save();
         canvas.scale((self.dpr, self.dpr));
         if let Some(main) = &self.main {
-            canvas.save();
-            canvas.scale((cam.zoom, cam.zoom));
-            canvas.translate((-cam.x, -cam.y));
-            let view = View { scale: cam.zoom * self.dpr, viewport, lod: true };
             self.renderer.begin_frame();
             self.renderer.reveal = reveal;
-            for s in main.ordered() {
-                self.renderer.draw_scene(canvas, s, &view);
-            }
-            if let Some((over, opacity)) = &self.overlay {
-                // Its own thumbnails and files; no draw-in animation.
-                let reveal = std::mem::take(&mut self.renderer.reveal);
-                self.renderer.layer = 1;
-                self.renderer.base_dir = over.base.clone();
-                canvas.save_layer_alpha_f(None, *opacity);
-                for s in over.ordered() {
+            if let Some(ch) = &self.changes {
+                changes::draw_rows(canvas, &mut self.renderer, main, ch, cam, self.dpr, self.size);
+            } else {
+                canvas.save();
+                canvas.scale((cam.zoom, cam.zoom));
+                canvas.translate((-cam.x, -cam.y));
+                let view = View { scale: cam.zoom * self.dpr, viewport, lod: true };
+                for s in main.ordered() {
                     self.renderer.draw_scene(canvas, s, &view);
                 }
+                if let Some((over, opacity)) = &self.overlay {
+                    // Its own thumbnails and files; no draw-in animation.
+                    let reveal = std::mem::take(&mut self.renderer.reveal);
+                    self.renderer.layer = 1;
+                    self.renderer.base_dir = over.base.clone();
+                    canvas.save_layer_alpha_f(None, *opacity);
+                    for s in over.ordered() {
+                        self.renderer.draw_scene(canvas, s, &view);
+                    }
+                    canvas.restore();
+                    self.renderer.layer = 0;
+                    self.renderer.base_dir = main.base.clone();
+                    self.renderer.reveal = reveal;
+                }
                 canvas.restore();
-                self.renderer.layer = 0;
-                self.renderer.base_dir = main.base.clone();
-                self.renderer.reveal = reveal;
             }
             self.renderer.text.end_frame();
-            canvas.restore();
 
             for (color, quads) in &highlights {
                 let fill = Paint::new(Color4f::new(color.r, color.g, color.b, 0.12), None);
@@ -721,7 +758,8 @@ impl Viewer {
             }
 
             let label = Paint::new(if self.dark { Color4f::new(0.74, 0.74, 0.77, 1.0) } else { Color4f::new(0.42, 0.42, 0.45, 1.0) }, None);
-            for s in main.ordered() {
+            // Frame titles (the changes layout's rows get theirs from the page).
+            for s in main.ordered().into_iter().filter(|_| self.changes.is_none()) {
                 let Some(n) = s.root() else { continue };
                 if !n.enabled || !matches!(n.kind, Kind::Frame { .. }) {
                     continue;
@@ -1028,6 +1066,7 @@ pub extern "C" fn study_pan(v: *mut Viewer, dx: f32, dy: f32) {
     let v = viewer(v);
     v.cam.x -= dx / v.cam.zoom;
     v.cam.y -= dy / v.cam.zoom;
+    v.clamp_cam();
 }
 
 /// Zooms by `factor` around (x, y) in CSS pixels.
@@ -1040,7 +1079,8 @@ pub extern "C" fn study_zoom(v: *mut Viewer, factor: f32, x: f32, y: f32) {
 #[unsafe(no_mangle)]
 pub extern "C" fn study_fit(v: *mut Viewer, ptr: *const u8, len: usize) {
     let v = viewer(v);
-    let r = keys(ptr, len).iter().filter_map(|k| v.doc_box(k)).reduce(|a, b| a.union(&b));
+    let boxes = keys(ptr, len).iter().filter_map(|k| if v.changes.is_some() { v.list_box(k) } else { v.doc_box(Side::After, k) }).collect::<Vec<_>>();
+    let r = boxes.into_iter().reduce(|a, b| a.union(&b));
     v.fit(r);
 }
 
@@ -1057,6 +1097,7 @@ pub extern "C" fn study_set_camera(v: *mut Viewer, x: f32, y: f32, zoom: f32) {
     let v = viewer(v);
     v.cam = Camera { x, y, zoom: zoom.clamp(0.001, 256.0) };
     v.fitted = true;
+    v.clamp_cam();
 }
 
 #[unsafe(no_mangle)]
@@ -1127,18 +1168,24 @@ pub extern "C" fn study_pointer_left(v: *mut Viewer) -> bool {
     v.hover.take().is_some()
 }
 
+/// `{"id", "side"}` of a node and the version it's in (`before` only in the changes layout).
+fn side_key(h: Option<(String, Side)>) -> Option<String> {
+    h.map(|(id, side)| json!({"id": id, "side": side.name()}).to_string())
+}
+
+/// The hovered node as `{"id", "side"}`, or null.
 #[unsafe(no_mangle)]
 pub extern "C" fn study_hovered(v: *mut Viewer) -> *const c_char {
     let v = viewer(v);
-    let h = v.hover.clone();
+    let h = side_key(v.hover.clone());
     give(v, h)
 }
 
-/// The node under a point in CSS pixels, or null.
+/// The node under a point in CSS pixels as `{"id", "side"}`, or null.
 #[unsafe(no_mangle)]
 pub extern "C" fn study_hit(v: *mut Viewer, x: f32, y: f32) -> *const c_char {
     let v = viewer(v);
-    let h = v.hit(x, y);
+    let h = side_key(v.hit(x, y));
     give(v, h)
 }
 
@@ -1154,46 +1201,49 @@ pub extern "C" fn study_select_relative(v: *mut Viewer, up: bool) {
     viewer(v).select_relative(up);
 }
 
-/// Replaces the selection (JSON array of ids); unknown ids are dropped.
+/// Replaces the selection (JSON array of ids) on a side (1: the changes layout's `before`, else
+/// the shown document); unknown ids are dropped.
 #[unsafe(no_mangle)]
-pub extern "C" fn study_select(v: *mut Viewer, ptr: *const u8, len: usize) {
+pub extern "C" fn study_select(v: *mut Viewer, ptr: *const u8, len: usize, side: i32) {
     let v = viewer(v);
+    let side = Side::from_arg(side);
     let mut list = keys(ptr, len);
-    list.retain(|k| v.locate(k).is_some());
+    list.retain(|k| v.locate_on(side, k).is_some());
     list.dedup();
     v.selection = list;
+    v.sel_side = side;
 }
 
-/// The selection, as a JSON array of ids.
+/// The selection, as JSON `{"ids": [...], "side"}`.
 #[unsafe(no_mangle)]
 pub extern "C" fn study_selection(v: *mut Viewer) -> *const c_char {
     let v = viewer(v);
-    let s = serde_json::to_string(&v.selection).ok();
-    give(v, s)
+    let s = json!({"ids": v.selection, "side": v.sel_side.name()}).to_string();
+    give(v, Some(s))
 }
 
-/// JSON describing a node (see `Viewer::node_info`), or null if it isn't in the document.
+/// JSON describing a node (see `Viewer::node_info`) on a side (as in `study_select`), or null.
 #[unsafe(no_mangle)]
-pub extern "C" fn study_node_info(v: *mut Viewer, ptr: *const u8, len: usize) -> *const c_char {
+pub extern "C" fn study_node_info(v: *mut Viewer, ptr: *const u8, len: usize, side: i32) -> *const c_char {
     let v = viewer(v);
-    let info = v.node_info(&string(ptr, len)).map(|i| i.to_string());
+    let info = v.node_info(&string(ptr, len), Side::from_arg(side)).map(|i| i.to_string());
     give(v, info)
 }
 
-/// The node's JSON in the document, or null.
+/// The node's JSON in its document, or null.
 #[unsafe(no_mangle)]
-pub extern "C" fn study_node_json(v: *mut Viewer, ptr: *const u8, len: usize) -> *const c_char {
+pub extern "C" fn study_node_json(v: *mut Viewer, ptr: *const u8, len: usize, side: i32) -> *const c_char {
     let v = viewer(v);
-    let j = v.node_json(&string(ptr, len)).map(|j| j.to_string());
+    let j = v.node_json(&string(ptr, len), Side::from_arg(side)).map(|j| j.to_string());
     give(v, j)
 }
 
 /// Renders a node to PNG (`scale` ≤ 0: the screenshot tool's size). Read it with
 /// `study_blob_ptr`/`study_blob_len`; false if the node doesn't exist.
 #[unsafe(no_mangle)]
-pub extern "C" fn study_snapshot(v: *mut Viewer, ptr: *const u8, len: usize, scale: f32) -> bool {
+pub extern "C" fn study_snapshot(v: *mut Viewer, ptr: *const u8, len: usize, scale: f32, side: i32) -> bool {
     let v = viewer(v);
-    let png = v.snapshot(&string(ptr, len), (scale > 0.0).then_some(scale));
+    let png = v.snapshot(&string(ptr, len), (scale > 0.0).then_some(scale), Side::from_arg(side));
     v.blob = png.unwrap_or_default();
     !v.blob.is_empty()
 }
@@ -1278,9 +1328,67 @@ pub extern "C" fn study_set_overlay(v: *mut Viewer, ptr: *const u8, len: usize, 
 
 #[unsafe(no_mangle)]
 pub extern "C" fn study_set_overlay_opacity(v: *mut Viewer, opacity: f32) {
-    if let Some((_, o)) = &mut viewer(v).overlay {
+    let v = viewer(v);
+    if let Some((_, o)) = &mut v.overlay {
         *o = opacity.clamp(0.0, 1.0);
     }
+    if let Some(ch) = &mut v.changes {
+        ch.opts.opacity = opacity.clamp(0.0, 1.0);
+    }
+}
+
+/// Shows the changes layout against another version (UTF-8 JSON at page path `path`) with
+/// options (JSON, see `changes::Options::parse`). Returns null, or an error.
+#[unsafe(no_mangle)]
+pub extern "C" fn study_show_changes(v: *mut Viewer, ptr: *const u8, len: usize, path: *const u8, path_len: usize, opts: *const u8, opts_len: usize) -> *const c_char {
+    let v = viewer(v);
+    let text = String::from_utf8_lossy(bytes(ptr, len)).into_owned();
+    let opts: Value = serde_json::from_slice(bytes(opts, opts_len)).unwrap_or(Value::Null);
+    let err = v.show_changes(&text, &string(path, path_len), &opts).err();
+    give(v, err)
+}
+
+/// Replaces the changes layout's options (JSON). Returns null, or an error.
+#[unsafe(no_mangle)]
+pub extern "C" fn study_changes_options(v: *mut Viewer, opts: *const u8, opts_len: usize) -> *const c_char {
+    let v = viewer(v);
+    let opts: Value = serde_json::from_slice(bytes(opts, opts_len)).unwrap_or(Value::Null);
+    let err = v.set_changes_options(&opts).err();
+    give(v, err)
+}
+
+/// Back to the whole document.
+#[unsafe(no_mangle)]
+pub extern "C" fn study_hide_changes(v: *mut Viewer) {
+    viewer(v).hide_changes();
+}
+
+/// Bumped whenever the rows' sizes or places change (0 outside the changes layout).
+#[unsafe(no_mangle)]
+pub extern "C" fn study_changes_version(v: *mut Viewer) -> u32 {
+    viewer(v).changes_version()
+}
+
+/// The rows as JSON, on screen; null outside the changes layout.
+#[unsafe(no_mangle)]
+pub extern "C" fn study_changes_rows(v: *mut Viewer) -> *const c_char {
+    let v = viewer(v);
+    let rows = v.rows_json().map(|r| r.to_string());
+    give(v, rows)
+}
+
+/// The row at (x, y) CSS px as JSON, with `side`, or null.
+#[unsafe(no_mangle)]
+pub extern "C" fn study_row_at(v: *mut Viewer, x: f32, y: f32) -> *const c_char {
+    let v = viewer(v);
+    let row = v.row_at(x, y).map(|r| r.to_string());
+    give(v, row)
+}
+
+/// Scrolls a row (by top-level id) to the top. False if there's no such row.
+#[unsafe(no_mangle)]
+pub extern "C" fn study_scroll_to_row(v: *mut Viewer, ptr: *const u8, len: usize) -> bool {
+    viewer(v).scroll_to_row(&string(ptr, len))
 }
 
 /// Problems since the last call (script and import failures), as a JSON array, or null.

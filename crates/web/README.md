@@ -33,7 +33,8 @@ files:
 
 Bundlers that understand `new URL(..., import.meta.url)`, such as Vite, find the files on their
 own. Otherwise pass `locateFile: (name) => "/static/study/" + name`. Serve `dist/` to try the
-demos: `demo.html` shows every feature and `compare.html` compares two versions.
+demos: `demo.html` shows every feature, `compare.html` compares two versions side by side, and
+`changes.html` shows only the frames that changed.
 
 ## Showing a document
 
@@ -107,20 +108,22 @@ Every node is described by a `NodeInfo`:
   parent: string | null;
   root: string | null; // the top-level frame it's in
   instance: string | null; // the component instance it's inside, if any
+  side: "after" | "before"; // "before": the older version in the changes layout
   bounds: { x, y, width, height }; // document units
-  screen: { x, y, width, height }; // CSS pixels from the canvas's top-left corner
+  screen: { x, y, width, height } | null; // CSS pixels from the canvas's top-left corner
+  // (null in the changes layout when its frame has no row)
 }
 ```
 
 | Member | |
 | --- | --- |
 | `viewer.selection` | `NodeInfo[]` |
-| `viewer.select(ids)` | Replace the selection (`[]` clears it) |
-| `viewer.node(id)` / `viewer.nodeAt(x, y)` | `NodeInfo` or `null` |
-| `viewer.nodeJson(id)` | The node as written in the `.pen` file |
-| `viewer.snapshot(id, { scale })` | A PNG `Blob` of the node as drawn |
+| `viewer.select(ids, { side })` | Replace the selection (`[]` clears it) |
+| `viewer.node(id, { side })` / `viewer.nodeAt(x, y)` | `NodeInfo` or `null` |
+| `viewer.nodeJson(id, { side })` | The node as written in the `.pen` file |
+| `viewer.snapshot(id, { scale, side })` | A PNG `Blob` of the node as drawn |
 | `viewer.zoomTo(ids)`, `fit()`, `zoomBy(f)`, `camera` | View control |
-| `viewer.compare(pen)`, `highlight(ids, { kind })`, `setOverlay(pen)` | See "Comparing versions" |
+| `viewer.compare(pen)`, `showChanges(pen)`, `highlight(ids, { kind })`, `setOverlay(pen)` | See "Comparing versions" |
 
 Events come from `viewer.addEventListener(type, (e) => …)`, with data in `e.detail`:
 
@@ -133,6 +136,7 @@ Events come from `viewer.addEventListener(type, (e) => …)`, with data in `e.de
 | `viewchange` | `{ camera }` | The view moved; re-read `node(id).screen` |
 | `warning` | `{ message }` | A script failed, a file is missing, ... |
 | `themechange` | `{ theme }` | The built-in light/dark switch was clicked (`"light"` or `"dark"`) |
+| `layoutchange` | `{ rows }` | The changes layout's rows changed (see "Showing only what changed") |
 
 For example, a toolbar that follows the selection:
 
@@ -251,6 +255,66 @@ A JSON diff misses some of what these catch:
 translucent, to see exactly what shifted. `viewer.overlayOpacity = 0.3` changes the opacity
 without reloading it, for a slider, and `setOverlay(null)` removes it. The overlay isn't
 interactive: selection and hover stay on the shown document.
+
+### Showing only what changed
+
+Frames in a `.pen` file sit anywhere on the canvas, so a review is easier when it shows just the
+frames that changed, lined up. `showChanges` turns a viewer into that list: one row per changed
+top-level frame, the older version on the left and the shown one on the right, at the same scale.
+
+```js
+await viewer.load(newText, { path });
+const view = await viewer.showChanges(oldText, { path, gap: 44 });
+
+for (const row of view.rows) addHeader(row); // your HTML: name, kind, what changed
+viewer.addEventListener("viewchange", placeHeaders);   // scrolling moves the rows
+viewer.addEventListener("layoutchange", placeHeaders); // rows resized or recomputed
+list.onclick = (id) => view.scrollToRow(id);
+
+await viewer.showChanges(null); // back to the whole file, where the camera was
+```
+
+- **One renderer, real documents.** Both versions load fully, once, in the viewer you already
+  have: variables, themes, components, imports, fonts, images and scripts resolve as in a normal
+  load, and ids are the documents' own. Only the rows on screen are drawn, so a file with
+  hundreds of frames and four changes costs about what those four frames cost.
+- **Rows.** By default, every frame `compare` reports, in document order (a removed frame where
+  it used to be). `frames: [ids]` picks them instead. A frame only in the newer version leaves the
+  left side empty, and one only in `before` leaves the right side empty.
+- **Sizes.** The viewer sizes the rows: each side gets half the width, minus `padding` (24) and
+  `gutter` (24), and a row is as tall as its taller side. `fit: "width"` (the default) fills the
+  column width; `fit: "contain"` also keeps each row within the canvas height. `maxRowHeight`
+  scales down taller rows.
+- **Highlights.** Added and changed nodes are outlined on the right, removed ones on the left, in
+  the `highlight` colours (`colors: { added, changed, removed }` overrides them with `#rrggbb`).
+  A frame is tinted as a whole when it was added or removed, or when its own properties changed.
+  If it only grew or moved, the row's `kind` and `props` say so instead.
+- **One camera.** Scrolling and zooming move all rows together, and the view stops at the ends of
+  the list. `fit()` and the zoom control's percentage go back to 100%.
+- **Interaction.** Hover and selection work on both sides. `NodeInfo.side` says which version a
+  node is in (`"before"` or `"after"`), and the selection is on one side at a time. On the
+  `before` side, pass `{ side: "before" }` to `node`, `nodeJson`, `snapshot` and `select`.
+- **Onion skin.** `mode: "onion"` draws each row as one column, the older frame over the newer at
+  `opacity` (0.5). `viewer.overlayOpacity` changes it; selection stays on the newer version.
+  `view.setOptions({ mode: "side" })` switches back without reloading anything.
+- **Live.** It stays until `showChanges(null)`. `load` of a newer version recomputes the rows.
+  Fonts or scripts arriving and the canvas resizing re-size them. Each fires `layoutchange`.
+
+`showChanges` resolves once fonts and scripts have settled, or after `timeout` ms (10000), like
+`compare`. Each entry in `view.rows`:
+
+| Field | |
+| --- | --- |
+| `id`, `name` | The top-level frame |
+| `kind` | `"added"`, `"changed"` or `"removed"`; `"unchanged"` for a frame in `frames` that didn't change |
+| `props`, `moved` | The frame's own changed properties, and whether its order changed (as in `compare`) |
+| `before`, `after` | `{ x, y, width, height }` where each version is drawn, in CSS px from the canvas's top-left, or `null` |
+| `bounds` | The whole row |
+
+`view.rowAt(x, y)` returns the row at a point (gaps included) with the `side` it's on.
+`view.setOptions({...})` changes any option above without reloading `before`. `view.options`
+and `view.mode` read them back. `viewer.changes` is the current view, or null.
+`dist/changes.html` shows it with HTML row headers, a list of rows and the onion switch.
 
 ## Showing an agent's work live
 

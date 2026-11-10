@@ -22,6 +22,6 @@ out="$here/../../target/wasm32-unknown-emscripten/$profile"
 dist="$here/dist"
 mkdir -p "$dist"
 cp "$out/study-web.js" "$out/study_web.wasm" "$here/js/study-viewer.js" "$here/js/study-sandbox.html" "$dist/"
-# Demo pages: serve dist/ and open demo.html (?file=<url of a .pen>) or compare.html.
-cp "$here/js/demo.html" "$here/js/compare.html" "$here/../../examples/showcase.pen" "$dist/"
+# Demo pages: serve dist/ and open demo.html (?file=<url of a .pen>), compare.html or changes.html.
+cp "$here/js/demo.html" "$here/js/compare.html" "$here/js/changes.html" "$here/../../examples/showcase.pen" "$dist/"
 ls -l "$dist"

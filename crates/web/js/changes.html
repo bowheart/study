@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>study: changes</title>
+<style>
+  html, body { margin: 0; height: 100%; font: 13px system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; gap: 12px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #0002; flex-wrap: wrap; }
+  #status { margin-left: auto; color: #666; }
+  main { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 260px; grid-template-rows: minmax(0, 1fr); }
+  #stage { position: relative; min-width: 0; overflow: hidden; border-right: 1px solid #0002; }
+  canvas { width: 100%; height: 100%; display: block; }
+  #headers { position: absolute; inset: 0; pointer-events: none; }
+  .head { position: absolute; display: flex; gap: 8px; align-items: baseline; font-size: 12px; white-space: nowrap; overflow: hidden; }
+  .head small { color: #666; }
+  .side { position: absolute; font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: .04em; }
+  aside { display: flex; flex-direction: column; min-height: 0; }
+  ul { list-style: none; margin: 0; padding: 8px; overflow: auto; }
+  li { padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+  li:hover { background: #0001; }
+  pre { margin: 0; padding: 8px 12px; border-top: 1px solid #0002; font-size: 11px; white-space: pre-wrap; overflow: auto; max-height: 40%; }
+  .added { color: #16A34A; } .changed { color: #B45309; } .removed { color: #DC2626; } .unchanged { color: #666; }
+  .kind { font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <strong>Changes</strong>
+  <label><input type="radio" name="mode" value="side" checked> side by side</label>
+  <label><input type="radio" name="mode" value="onion"> onion skin</label>
+  <input type="range" id="opacity" min="0" max="100" value="50" disabled>
+  <label>fit <select id="fit"><option>width</option><option>contain</option></select></label>
+  <span id="status">Loading…</span>
+</header>
+<main>
+  <div id="stage"><canvas id="canvas"></canvas><div id="headers"></div></div>
+  <aside><ul id="rows"></ul><pre id="selection">Click a node.</pre></aside>
+</main>
+<script type="module">
+  import { createViewer } from "./study-viewer.js";
+
+  const $ = (id) => document.getElementById(id);
+  const readFile = async (p) => {
+    const res = await fetch(new URL(p, location.href));
+    return res.ok ? res.arrayBuffer() : null;
+  };
+  const path = "showcase.pen";
+  const showcase = await (await fetch(path)).json();
+
+  // Small cards next to the dashboard, so the file has several top-level frames.
+  const text = (id, content, size = 15, fill = "#102A43", weight) => ({ type: "text", id, content, fontSize: size, fill, ...(weight ? { fontWeight: weight } : {}) });
+  const card = (id, name, x, y, children) => ({ type: "frame", id, name, x, y, width: 360, layout: "vertical", gap: 12, padding: 24, fill: "#FFFFFF", cornerRadius: 16, children });
+  const button = (id, label, fill = "#2563EB") => ({ type: "frame", id, padding: [10, 16], fill, cornerRadius: 8, children: [text(id + "t", label, 14, "#FFFFFF", "600")] });
+  const field = (id, label) => ({ type: "frame", id, width: "fill_container", height: 40, cornerRadius: 8, stroke: { fill: "#CBD5E1", thickness: 1 }, padding: [0, 12], alignItems: "center", children: [text(id + "t", label, 14, "#94A3B8")] });
+
+  const cards = () => [
+    card("signin", "Sign in", 1400, 0, [text("sgT", "Welcome back", 22, "#102A43", "700"), field("sgE", "Email"), field("sgP", "Password"), button("sgB", "Sign in")]),
+    card("pricing", "Pricing", 1400, 420, [text("prT", "Pro", 22, "#102A43", "700"), text("prP", "$12 / month", 15, "#486581"), button("prB", "Upgrade", "#16A34A")]),
+    card("settings", "Settings", 1800, 0, [text("stT", "Settings", 22, "#102A43", "700"), text("stD", "Notifications, privacy and account.", 14, "#486581")]),
+  ];
+  const before = structuredClone(showcase);
+  before.children.push(...cards());
+
+  // The newer version: what an agent might have done.
+  const after = structuredClone(before);
+  const find = (nodes, id, parent = null) => {
+    for (const n of nodes ?? []) {
+      if (n.id === id) return { node: n, parent };
+      const hit = find(n.children, id, n);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  find(after.children, "ow7vZ").node.fill = "#DBEAFE";        // a component: every instance changes
+  find(after.children, "234KG").node.padding = [22, 0];       // taller row: the rows below move down
+  find(after.children, "sgBt").node.content = "Continue";     // the sign-in button
+  find(after.children, "signin").node.children.splice(3, 0, text("sgF", "Forgot password?", 13, "#2563EB"));
+  after.children = after.children.filter((n) => n.id !== "pricing");
+  after.children.push(card("onboard", "Onboarding", 1800, 420, [text("obT", "Pick your habits", 22, "#102A43", "700"), text("obD", "Start with three; add more later.", 14, "#486581"), button("obB", "Get started")]));
+
+  const viewer = await createViewer($("canvas"), { readFile, controls: { breadcrumb: false } });
+  window.viewer = viewer;
+  window.versions = { before, after };
+  await viewer.load(after, { path });
+  const t0 = performance.now();
+  const view = await viewer.showChanges(before, { path, gap: 44, padding: 36 });
+  window.view = view;
+  $("status").textContent = `${view.rows.length} frames changed · ${Math.round(performance.now() - t0)} ms`;
+
+  // Row headers in HTML, kept on their rows.
+  const headers = () => {
+    const box = $("headers");
+    box.replaceChildren();
+    const onion = view.mode === "onion";
+    for (const r of view.rows) {
+      const head = document.createElement("div");
+      head.className = "head";
+      Object.assign(head.style, { left: r.bounds.x + "px", top: r.bounds.y - 24 + "px", width: r.bounds.width + "px" });
+      const what = [r.props.length ? r.props.join(", ") : null, r.moved ? "moved" : null].filter(Boolean).join(" · ");
+      head.innerHTML = `<span class="kind ${r.kind}"></span><span class="name"></span><small></small>`;
+      head.querySelector(".kind").textContent = r.kind;
+      head.querySelector(".name").textContent = r.name ?? r.id;
+      head.querySelector("small").textContent = what;
+      box.append(head);
+      if (onion) continue;
+      for (const side of ["before", "after"]) {
+        if (!r[side] || r[side].y < 0) continue;
+        const label = document.createElement("div");
+        label.className = "side";
+        label.textContent = side;
+        Object.assign(label.style, { left: r[side].x + r[side].width - 40 + "px", top: r.bounds.y - 22 + "px" });
+        box.append(label);
+      }
+    }
+  };
+  viewer.addEventListener("viewchange", headers);
+  viewer.addEventListener("layoutchange", headers);
+  headers();
+
+  for (const r of view.rows) {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="kind ${r.kind}"></span> <span></span>`;
+    li.firstChild.textContent = r.kind;
+    li.lastChild.textContent = r.name ?? r.id;
+    li.onclick = () => view.scrollToRow(r.id);
+    $("rows").append(li);
+  }
+
+  viewer.addEventListener("select", (e) => {
+    const n = e.detail.nodes[0];
+    $("selection").textContent = n ? `${n.side}: ${n.name ?? n.id} (${n.id})\n\n${JSON.stringify(viewer.nodeJson(n.id, n), null, 1).slice(0, 600)}` : "Click a node.";
+  });
+
+  for (const radio of document.querySelectorAll("input[name=mode]")) {
+    radio.onchange = () => {
+      view.setOptions({ mode: radio.value, opacity: $("opacity").value / 100 });
+      $("opacity").disabled = radio.value !== "onion";
+    };
+  }
+  $("opacity").oninput = (e) => (viewer.overlayOpacity = e.target.value / 100);
+  $("fit").onchange = (e) => view.setOptions({ fit: e.target.value });
+</script>
+</body>
+</html>
