@@ -53,6 +53,9 @@ pub(super) struct Options {
     frames: Option<Vec<String>>,
     /// Outline colours: added, changed, removed.
     colors: [Color4f; 3],
+    /// Draw the outlines and tints (`highlights: false` hides them; rows, selection and hover
+    /// are unaffected).
+    pub(super) highlights: bool,
 }
 
 impl Options {
@@ -86,6 +89,11 @@ impl Options {
             padding: num("padding", 24.0),
             frames,
             colors,
+            highlights: match v.get("highlights") {
+                None | Some(Value::Null) => true,
+                Some(Value::Bool(b)) => *b,
+                Some(h) => return Err(format!("study: highlights must be true or false, not {h}")),
+            },
         })
     }
 }
@@ -160,11 +168,31 @@ pub(super) struct Changes {
     pub(super) version: u32,
     /// The camera to go back to, and whether it had been fitted.
     saved: (Camera, bool),
+    /// `flashHighlights`: when it started and how many seconds it holds.
+    flash: Option<(Instant, f32)>,
 }
+
+/// How long a flash takes to fade out after its hold.
+const FLASH_FADE: f32 = 0.3;
 
 impl Changes {
     pub(super) fn new(before: Layer, opts: Options, saved: (Camera, bool)) -> Changes {
-        Changes { before, opts, specs: Vec::new(), rows: Vec::new(), marks: Vec::new(), width: 0.0, height: 0.0, col_w: 0.0, cols: [0.0; 2], version: 0, saved }
+        Changes { before, opts, specs: Vec::new(), rows: Vec::new(), marks: Vec::new(), width: 0.0, height: 0.0, col_w: 0.0, cols: [0.0; 2], version: 0, saved, flash: None }
+    }
+
+    /// How strongly the highlights show: 1 while `highlights` is on, else a flash's fade.
+    pub(super) fn highlight_alpha(&self, now: Instant) -> f32 {
+        if self.opts.highlights {
+            return 1.0;
+        }
+        let Some((start, hold)) = self.flash else { return 0.0 };
+        let t = now.duration_since(start).as_secs_f32();
+        (1.0 - (t - hold) / FLASH_FADE).clamp(0.0, 1.0)
+    }
+
+    /// True while a flash is showing or fading, so frames keep coming.
+    pub(super) fn flashing(&self, now: Instant) -> bool {
+        !self.opts.highlights && self.flash.is_some_and(|(start, hold)| now.duration_since(start).as_secs_f32() < hold + FLASH_FADE)
     }
 
     fn onion(&self) -> bool {
@@ -475,17 +503,6 @@ impl Viewer {
         let size = self.size;
         let Some(ch) = &mut self.changes else { return };
         ch.place(size.0, size.1);
-        self.clamp_cam();
-    }
-
-    /// In the changes layout, keeps the rows in view: no scrolling past either end, and centred
-    /// when zoomed out narrower than the canvas.
-    pub(super) fn clamp_cam(&mut self) {
-        let Some(ch) = &self.changes else { return };
-        let (vw, vh) = (self.size.0 / self.cam.zoom, self.size.1 / self.cam.zoom);
-        let c = &mut self.cam;
-        c.x = if vw >= ch.width { (ch.width - vw) / 2.0 } else { c.x.clamp(0.0, ch.width - vw) };
-        c.y = if vh >= ch.height { 0.0 } else { c.y.clamp(0.0, ch.height - vh) };
     }
 
     fn row_json(&self, r: &Row) -> Value {
@@ -527,7 +544,6 @@ impl Viewer {
         let Some(ch) = &self.changes else { return false };
         let Some(r) = ch.rows.iter().find(|r| r.id == id) else { return false };
         self.cam.y = r.y - ch.opts.padding / self.cam.zoom;
-        self.clamp_cam();
         true
     }
 
@@ -540,10 +556,13 @@ impl Viewer {
                 let zoom = ((w - 2.0 * margin) / r.w.max(1.0)).min((h - 2.0 * margin) / r.h.max(1.0)).clamp(0.05, 8.0);
                 self.cam = Camera { x: r.x + r.w / 2.0 - w / zoom / 2.0, y: r.y + r.h / 2.0 - h / zoom / 2.0, zoom };
             }
-            None => self.cam = Camera { x: 0.0, y: self.cam.y, zoom: 1.0 },
+            // Laid-out size, staying at the current scroll position within the rows.
+            None => {
+                let bottom = self.changes.as_ref().map_or(0.0, |ch| (ch.height - self.size.1).max(0.0));
+                self.cam = Camera { x: 0.0, y: self.cam.y.clamp(0.0, bottom), zoom: 1.0 };
+            }
         }
         self.fitted = true;
-        self.clamp_cam();
     }
 
     /// Nodes' box in list space (`zoomTo` in the changes layout), from the shown side.
@@ -553,10 +572,25 @@ impl Viewer {
         Some(Rect::new(x, y, r.w / self.cam.zoom, r.h / self.cam.zoom))
     }
 
-    /// Outlines to draw in the changes layout, on screen.
+    /// Outlines to draw in the changes layout, on screen (none while `highlights` is off and
+    /// nothing is flashing; faded as a flash ends).
     pub(super) fn change_marks(&self) -> Vec<(Color4f, Vec<[(f32, f32); 4]>)> {
         let Some(ch) = &self.changes else { return Vec::new() };
-        ch.marks.iter().map(|(side, color, keys)| (*color, keys.iter().filter_map(|k| self.screen_corners(*side, k)).collect())).collect()
+        let alpha = ch.highlight_alpha(Instant::now());
+        if alpha <= 0.0 {
+            return Vec::new();
+        }
+        ch.marks
+            .iter()
+            .map(|(side, color, keys)| (Color4f { a: color.a * alpha, ..*color }, keys.iter().filter_map(|k| self.screen_corners(*side, k)).collect()))
+            .collect()
+    }
+
+    /// Shows the highlights for `secs` (then fades them) even while `highlights` is off.
+    pub(super) fn flash_highlights(&mut self, secs: f32) {
+        if let Some(ch) = &mut self.changes {
+            ch.flash = Some((Instant::now(), secs.max(0.0)));
+        }
     }
 }
 

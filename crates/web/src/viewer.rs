@@ -428,7 +428,6 @@ impl Viewer {
         let (dx, dy) = (self.cam.x + sx / self.cam.zoom, self.cam.y + sy / self.cam.zoom);
         let zoom = (self.cam.zoom * factor).clamp(0.001, 256.0);
         self.cam = Camera { x: dx - sx / zoom, y: dy - sy / zoom, zoom };
-        self.clamp_cam();
     }
 
     fn viewport(&self) -> Rect {
@@ -803,7 +802,7 @@ impl Viewer {
             self.renderer.text.end_frame();
 
             for (color, quads) in &highlights {
-                let fill = Paint::new(Color4f::new(color.r, color.g, color.b, 0.12), None);
+                let fill = Paint::new(Color4f::new(color.r, color.g, color.b, 0.12 * color.a), None);
                 for q in quads {
                     let mut b = PathBuilder::new();
                     b.move_to(q[0]);
@@ -851,6 +850,7 @@ impl Viewer {
             || !self.anims.is_empty()
             || !self.scans.is_empty()
             || !self.working.is_empty()
+            || self.changes.as_ref().is_some_and(|c| c.flashing(now))
     }
 }
 
@@ -1104,7 +1104,6 @@ pub extern "C" fn study_pan(v: *mut Viewer, dx: f32, dy: f32) {
     let v = viewer(v);
     v.cam.x -= dx / v.cam.zoom;
     v.cam.y -= dy / v.cam.zoom;
-    v.clamp_cam();
 }
 
 /// Zooms by `factor` around (x, y) in CSS pixels.
@@ -1135,7 +1134,6 @@ pub extern "C" fn study_set_camera(v: *mut Viewer, x: f32, y: f32, zoom: f32) {
     let v = viewer(v);
     v.cam = Camera { x, y, zoom: zoom.clamp(0.001, 256.0) };
     v.fitted = true;
-    v.clamp_cam();
 }
 
 #[unsafe(no_mangle)]
@@ -1393,6 +1391,12 @@ pub extern "C" fn study_changes_options(v: *mut Viewer, opts: *const u8, opts_le
     let opts: Value = serde_json::from_slice(bytes(opts, opts_len)).unwrap_or(Value::Null);
     let err = v.set_changes_options(&opts).err();
     give(v, err)
+}
+
+/// Shows the changes highlights for `ms` milliseconds, then fades them, while `highlights` is off.
+#[unsafe(no_mangle)]
+pub extern "C" fn study_flash_highlights(v: *mut Viewer, ms: f32) {
+    viewer(v).flash_highlights(ms / 1000.0);
 }
 
 /// Back to the whole document.

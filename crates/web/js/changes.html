@@ -32,6 +32,8 @@
   <label><input type="radio" name="mode" value="onion"> onion skin</label>
   <input type="range" id="opacity" min="0" max="100" value="50" disabled>
   <label>fit <select id="fit"><option>width</option><option>contain</option></select></label>
+  <label><input type="checkbox" id="highlights" checked> highlights</label>
+  <button id="flash">Flash</button>
   <span id="status">Loading…</span>
 </header>
 <main>
@@ -94,7 +96,10 @@
     const box = $("headers");
     box.replaceChildren();
     const onion = view.mode === "onion";
-    for (const r of view.rows) {
+    const rows = view.rows;
+    // Zoomed out, the gap between rows gets too small for a header above each.
+    if (rows.some((r, i) => i > 0 && r.bounds.y - (rows[i - 1].bounds.y + rows[i - 1].bounds.height) < 26)) return;
+    for (const r of rows) {
       const head = document.createElement("div");
       head.className = "head";
       Object.assign(head.style, { left: r.bounds.x + "px", top: r.bounds.y - 24 + "px", width: r.bounds.width + "px" });
@@ -141,6 +146,9 @@
   }
   $("opacity").oninput = (e) => (viewer.overlayOpacity = e.target.value / 100);
   $("fit").onchange = (e) => view.setOptions({ fit: e.target.value });
+  // Highlights off, with a button that shows them for a second.
+  $("highlights").onchange = (e) => view.setOptions({ highlights: e.target.checked });
+  $("flash").onclick = () => view.flashHighlights({ duration: 1000 });
 </script>
 </body>
 </html>

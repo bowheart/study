@@ -218,14 +218,15 @@ style (variables and themes applied, instances expanded) plus computed rects and
   through `study_pump`, not frames, because background tabs don't get animation frames.
 - **Changes layout** (`crates/web/src/changes.rs`, `showChanges`). Rows live in *list space*:
   CSS px at zoom 1, as wide as the canvas. The camera moves over list space instead of the
-  document and is clamped to the list. Each side of a row is a `Place`: a top-level root of the
+  document, as freely as over a document. Each side of a row is a `Place`: a top-level root of the
   main layer or the `before` layer, its document box, and where it's drawn. `draw_rows` clips to
   the cell and draws the real scene through that transform, so nothing is copied or re-laid out
   per row. `doc_xf(side, key)` (document → screen) is what every overlay uses: selection, hover,
   highlights, `NodeInfo.screen`, agent presence. Selection and hover carry a `Side`. Rows are
   recomputed (`diff`) on load, script results and fonts. They're re-placed (`place`) on resize
   and new options, and `version` bumps when geometry changes (the page's `layoutchange`). The
-  `before` layer draws with `Renderer::layer = 2`.
+  `before` layer draws with `Renderer::layer = 2`. `Changes::highlight_alpha` scales the marks:
+  1 with `highlights` on, else a `flashHighlights` hold and fade (frames continue while it runs).
 - **MCP for host apps.** Headless `study mcp` with `STUDY_EVENTS=<file>` appends one JSON line
   per execute call (`record_presence`). The line carries `size`/`sha256` of the bytes the call
   saved (`Engine::saved`, from the text `Document::save_as` returns) and `created` (set by

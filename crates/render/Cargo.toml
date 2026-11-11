@@ -11,13 +11,12 @@ serde_json.workspace = true
 flate2 = "1.1.10"
 tar = "0.4.46"
 image-webp = "0.2"
+# Browsers get WOFF2 from Google Fonts, which FreeType can't read (see fonts.rs).
+woff2-patched = "0.4"
 
 # The web build (crates/web) has no sockets: the page fetches for it, see net.rs.
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 ureq = "3.5.0"
-
-[target.'cfg(target_os = "emscripten")'.dependencies]
-woff2-patched = "0.4"
 
 # rust-skia only publishes prebuilt macOS binaries for GL + SVG + text layout together with Metal;
 # without it the build falls back to compiling Skia from source (slow, needs ninja).

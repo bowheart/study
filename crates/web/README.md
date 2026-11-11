@@ -299,9 +299,12 @@ await viewer.showChanges(null); // back to the whole file, where the camera was
 - **Highlights.** Added and changed nodes are outlined on the right, removed ones on the left, in
   the `highlight` colours (`colors: { added, changed, removed }` overrides them with `#rrggbb`).
   A frame is tinted as a whole when it was added or removed, or when its own properties changed.
-  If it only grew or moved, the row's `kind` and `props` say so instead.
-- **One camera.** Scrolling and zooming move all rows together, and the view stops at the ends of
-  the list. `fit()` and the zoom control's percentage go back to 100%.
+  If it only grew or moved, the row's `kind` and `props` say so instead. `highlights: false`
+  hides the outlines and tints (rows, selection and hover stay), and
+  `view.flashHighlights({ duration })` shows them for `duration` ms (1000), then fades them, for
+  a "what changed?" button next to a toggle.
+- **One camera.** Scrolling and zooming move all rows together, freely, as on a document.
+  `fit()` and the zoom control's percentage go back to 100% at the current scroll position.
 - **Interaction.** Hover and selection work on both sides. `NodeInfo.side` says which version a
   node is in (`"before"` or `"after"`), and the selection is on one side at a time. On the
   `before` side, pass `{ side: "before" }` to `node`, `nodeJson`, `snapshot` and `select`.
@@ -325,7 +328,8 @@ await viewer.showChanges(null); // back to the whole file, where the camera was
 `view.rowAt(x, y)` returns the row at a point (gaps included) with the `side` it's on.
 `view.setOptions({...})` changes any option above without reloading `before`. `view.options`
 and `view.mode` read them back. `viewer.changes` is the current view, or null.
-`dist/changes.html` shows it with HTML row headers, a list of rows and the onion switch.
+`dist/changes.html` shows it with HTML row headers, a list of rows, the onion switch, and a
+highlights toggle with a Flash button.
 
 ## Showing an agent's work live
 
@@ -464,7 +468,8 @@ to the system's fonts:
    For browsers, Google splits each font into subsets by script (`latin`, `cyrillic`, `greek`,
    `vietnamese`, numbered CJK slices, ...), each with a `unicode-range`.
 2. **Subsets:** it downloads only the subsets whose ranges cover characters the text actually
-   uses, from `fonts.gstatic.com`. Latin always loads, and WOFF2 is decoded in the viewer. A
+   uses, from `fonts.gstatic.com`. Latin always loads. Google sends WOFF2, or WOFF to some browsers
+   (Safari, Firefox); the viewer decodes both. A
    subset's real glyph table overrides its declared range once loaded, because the range can
    claim characters the file lacks.
 3. **Fallbacks:** characters the family doesn't have at all (emoji, symbols, CJK in a Latin
@@ -524,7 +529,7 @@ const viewer = await createViewer(canvas, {
   format. Each `@font-face` contributes its `src: url(...)`, plus `unicode-range` if it has one.
   A rule without `unicode-range` is one complete font, and its glyphs are checked once it loads.
   That's what Google itself returns when a proxy calls it without a browser `User-Agent`: one
-  complete TrueType file per weight. Fonts can be WOFF2, TrueType or OpenType.
+  complete TrueType file per weight. Fonts can be WOFF2, WOFF, TrueType or OpenType.
 - **Missing fonts:** return status 400 or 404 for a family you don't have, and its text falls
   back as above.
 - **Offline or locked-down deployments:** serve the stylesheets and files for every family your

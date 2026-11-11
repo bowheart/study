@@ -62,6 +62,10 @@ const sideArg = (side) => (side === "before" ? 1 : 0);
 export async function createViewer(canvas, options = {}) {
   const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, depth: false, stencil: true, premultipliedAlpha: true });
   if (!gl) throw new Error("study: this browser has no WebGL2");
+  // Skia asks for the GPU's name when this extension is listed, but it isn't enabled, so the
+  // browser logs INVALID_ENUM. Skia doesn't need it; enabling it is deprecated in Firefox.
+  const supported = gl.getSupportedExtensions.bind(gl);
+  gl.getSupportedExtensions = () => supported()?.filter((e) => e !== "WEBGL_debug_renderer_info") ?? null;
   const locateFile = options.locateFile ?? ((file) => new URL(file, import.meta.url).href);
   const module = await createStudyModule({ locateFile });
   return new Viewer(canvas, gl, module, { ...options, locateFile });
@@ -307,6 +311,10 @@ export class Viewer extends EventTarget {
         this.#changeOptions = next;
         this.redraw();
         this.#emitIfSelectionChanged(before);
+      },
+      flash: (ms) => {
+        this.#m._study_flash_highlights(this.#v, ms);
+        this.redraw();
       },
       close: () => this.showChanges(null),
       active: (view) => this.#changes === view,
@@ -805,15 +813,26 @@ export class ChangesView {
   /** `"side"` or `"onion"`. */
   get mode() { return this.options.mode ?? "side"; }
 
-  /** The options in effect (as passed to `showChanges`, with later `setOptions`). */
-  get options() { return this.#active() ? this.#api.options() : {}; }
+  /**
+   * The options in effect (as passed to `showChanges`, with later `setOptions`). `highlights` is
+   * always present.
+   */
+  get options() { return this.#active() ? { highlights: true, ...this.#api.options() } : {}; }
 
   /**
    * Changes options without loading `before` again: `mode`, `opacity`, `fit`, `maxRowHeight`,
-   * `gap`, `gutter`, `padding`, `frames`, `colors`. Missing ones keep their values.
+   * `gap`, `gutter`, `padding`, `frames`, `colors`, `highlights`. Missing ones keep their values.
    */
   setOptions(options) {
     if (this.#active()) this.#api.setOptions(options);
+  }
+
+  /**
+   * Shows the added/changed/removed highlights for `duration` ms, then fades them out, while
+   * `highlights` is off. Does nothing visible while they're on.
+   */
+  flashHighlights({ duration = 1000 } = {}) {
+    if (this.#active()) this.#api.flash(duration);
   }
 
   /** Back to the whole document (`viewer.showChanges(null)`). */
