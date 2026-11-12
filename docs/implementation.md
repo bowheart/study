@@ -159,7 +159,10 @@ style (variables and themes applied, instances expanded) plus computed rects and
   `study_fulfill`.
 - **Fonts on the web.** `render/src/fonts/web.rs` mirrors a browser's web-font loading:
   - Google's per-script WOFF2 subsets load lazily by `unicode-range` for the characters each
-    text uses (`Fonts::request_text`). Subsets are decoded with `woff2-patched`.
+    text uses (`Fonts::request_text`). They come as WOFF2, or WOFF for some user agents (Safari,
+    Firefox); `Fonts::typeface` unpacks both with `wuff`, a port of Google's woff2 decoder.
+    (`woff2-patched` 0.4 rejected current Google WOFF2, whose glyf tables carry the overlap
+    bitmap; `fonts/woff_tests.rs` keeps one as a fixture.)
   - The base (`latin`) subset registers under the family name, the others as `Family#subset`.
     `Fonts::families` lists them, then the loaded fallback families, as the paragraph's family
     list.

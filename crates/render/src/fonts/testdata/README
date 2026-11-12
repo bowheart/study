@@ -1,0 +1,3 @@
+dm-sans-latin.woff2: DM Sans 400, Latin subset, as Google Fonts served it to Chrome 142. Its
+transformed glyf table has the overlap bitmap, which woff2-patched 0.4 failed on. Licensed
+under the SIL Open Font License (DM-Sans-OFL.txt).

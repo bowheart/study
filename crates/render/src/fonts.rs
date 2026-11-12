@@ -1,10 +1,10 @@
 //! Font loading: Google Fonts (downloaded once, cached on disk) with system fallback. The web
-//! build loads per-script subsets with Noto fallbacks instead (see `web.rs`), as WOFF2 or WOFF
-//! (see `woff.rs`).
+//! build loads per-script subsets with Noto fallbacks instead (see `web.rs`), as WOFF2 or WOFF.
 
 #[cfg(target_os = "emscripten")]
 mod web;
-mod woff;
+#[cfg(test)]
+mod woff_tests;
 
 use skia_safe::textlayout::{FontCollection, TypefaceFontProvider};
 use skia_safe::FontMgr;
@@ -147,11 +147,12 @@ impl Fonts {
     /// A typeface from font file bytes, without making it available to documents.
     /// TrueType, OpenType, WOFF2 and WOFF are read.
     pub fn typeface(&self, bytes: &[u8]) -> Option<skia_safe::Typeface> {
-        // Browsers get WOFF2 or WOFF from Google Fonts, which FreeType can't read.
-        let decoded = if woff2_patched::decode::is_woff2(bytes) {
-            Some(woff2_patched::decode::convert_woff2_to_ttf(&mut &bytes[..]).ok()?)
-        } else if woff::is_woff(bytes) {
-            Some(woff::to_sfnt(bytes)?)
+        // Browsers get WOFF2, or WOFF for some user agents, from Google Fonts. FreeType reads
+        // neither, so they're unpacked with wuff (a port of Google's own woff2 decoder).
+        let decoded = if bytes.starts_with(b"wOF2") {
+            Some(wuff::decompress_woff2(bytes).ok()?)
+        } else if bytes.starts_with(b"wOFF") {
+            Some(wuff::decompress_woff1(bytes).ok()?)
         } else {
             None
         };

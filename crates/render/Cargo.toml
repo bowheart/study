@@ -11,8 +11,8 @@ serde_json.workspace = true
 flate2 = "1.1.10"
 tar = "0.4.46"
 image-webp = "0.2"
-# Browsers get WOFF2 from Google Fonts, which FreeType can't read (see fonts.rs).
-woff2-patched = "0.4"
+# Browsers get WOFF2 or WOFF from Google Fonts, which FreeType can't read (see fonts.rs).
+wuff = "0.2.10"
 
 # The web build (crates/web) has no sockets: the page fetches for it, see net.rs.
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
