@@ -6,7 +6,7 @@ default-members = ["crates/pen", "crates/render", "crates/study"]
 
 [workspace.package]
 edition = "2021"
-version = "0.5.2"
+version = "0.5.3"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

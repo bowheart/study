@@ -1724,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "pen"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "fastrand",
@@ -1997,7 +1997,7 @@ dependencies = [
 
 [[package]]
 name = "render"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "flate2",
@@ -2420,7 +2420,7 @@ dependencies = [
 
 [[package]]
 name = "study"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "base64",
@@ -2447,7 +2447,7 @@ dependencies = [
 
 [[package]]
 name = "study-web"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "gl",
  "pen",
