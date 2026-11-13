@@ -261,12 +261,20 @@ impl Engine {
         Ok(())
     }
 
-    /// Re-reads the file if it changed on disk behind our back. Returns true if reloaded.
+    /// Re-reads the file if it changed on disk behind our back, or just its imports if only they
+    /// changed (keeping the undo history). Returns true if anything was reloaded.
     pub fn reload_if_changed(&mut self) -> bool {
         let Some(path) = self.path().map(Path::to_path_buf) else { return false };
         let now = mtime(&path);
         if now.is_none() || now == self.disk_mtime {
-            return false;
+            if !self.imports.changed_on_disk() {
+                return false;
+            }
+            self.imports = Imports::load(&self.doc);
+            self.vars = vars_for(&self.doc, &self.imports);
+            self.dirty_all = true;
+            self.refresh();
+            return true;
         }
         self.disk_mtime = now;
         match Document::load(&path) {
@@ -364,5 +372,49 @@ impl Engine {
             }
         }
         layout(s, &mut self.renderer.text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn write(path: &Path, text: &str, at: SystemTime) {
+        std::fs::write(path, text).unwrap();
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(at).unwrap();
+    }
+
+    #[test]
+    fn reloads_changed_imports_without_reloading_the_document() {
+        let dir = std::env::temp_dir().join(format!("study-imports-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (doc, kit) = (dir.join("doc.pen"), dir.join("kit.pen"));
+        let t0 = SystemTime::now() - Duration::from_secs(60);
+        let kit_with = |color: &str| format!(r#"{{"version":"2.6","variables":{{"accent":{{"type":"color","value":"{color}"}}}},"children":[]}}"#);
+        write(&kit, &kit_with("#ff0000"), t0);
+        write(&doc, r#"{"version":"2.6","imports":{"kit":"kit.pen"},"children":[]}"#, t0);
+
+        let mut e = Engine::open(&doc).unwrap();
+        e.refresh();
+        let accent = |e: &Engine| e.imports.variables["kit:accent"]["value"].clone();
+        assert_eq!(accent(&e), "#ff0000");
+        e.undo.push(Vec::new());
+        assert!(!e.reload_if_changed(), "nothing changed yet");
+
+        write(&kit, &kit_with("#00ff00"), t0 + Duration::from_secs(10));
+        assert!(e.reload_if_changed());
+        assert_eq!(accent(&e), "#00ff00");
+        assert_eq!(e.undo.len(), 1, "an imports-only reload keeps the undo history");
+        assert!(!e.reload_if_changed(), "the new mtime is recorded");
+
+        // A missing import that appears later is picked up too.
+        std::fs::remove_file(&kit).unwrap();
+        assert!(e.reload_if_changed());
+        assert!(e.imports.variables.is_empty());
+        write(&kit, &kit_with("#0000ff"), t0 + Duration::from_secs(20));
+        assert!(e.reload_if_changed());
+        assert_eq!(accent(&e), "#0000ff");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -710,10 +710,22 @@ impl App {
             "get_app_state" => {
                 let view = self.viewport();
                 let info = ViewInfo { x: view.x, y: view.y, w: view.w, h: view.h, zoom: self.cam.zoom };
+                let mut reloaded = false;
                 let text = match self.engine.as_mut() {
-                    Some(e) => tools::app_state(e, Some(info)),
+                    Some(e) => {
+                        // Don't wait for the next disk poll: report the document as it is now.
+                        if e.reload_if_changed() {
+                            e.prune_selection();
+                            reloaded = true;
+                        }
+                        tools::app_state(e, Some(info))
+                    }
                     None => "A study window is open with no document. Pass a .pen file path as `filePath` to execute.\n".into(),
                 };
+                if reloaded {
+                    self.anims.clear();
+                    self.redraw();
+                }
                 json!({"content": [{"type": "text", "text": text}], "isError": false})
             }
             "execute" => match self.engine.as_mut() {

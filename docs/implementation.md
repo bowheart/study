@@ -45,7 +45,10 @@ style (variables and themes applied, instances expanded) plus computed rects and
   node of an import is pre-serialized as `alias:id` with nested refs and `$vars` rewritten to
   `alias:...`; refs that miss locally compile from that JSON. Variables are merged into `Vars` as
   `alias:name`. Pen's own reference syntax is undocumented; bare ids/names that exist in an import
-  also resolve.
+  also resolve. `Imports` keeps each imported file's mtime from when it was read; when only those
+  change, `Engine::reload_if_changed` rebuilds the imports and `Vars` and recompiles every root,
+  keeping the document and its undo history. It runs before each `execute`, on `get_app_state`
+  and on a window's ~1 s disk poll.
 - Script nodes compile as empty containers (`Kind::Script`). After layout the engine runs each
   script with its laid-out size (`study::scripts`) and `graft`s the returned JSON in as children
   (no ids, so not addressable or selectable), then lays out again.

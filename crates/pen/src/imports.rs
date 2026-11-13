@@ -12,6 +12,7 @@ use crate::Props;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 #[derive(Default)]
 pub struct Imports {
@@ -23,6 +24,9 @@ pub struct Imports {
     pub variables: Props,
     /// Imports that could not be loaded, with the reason.
     pub errors: Vec<String>,
+    /// Each imported file with its modified time when it was read (`None` if it wasn't there),
+    /// so changes on disk can be noticed. Pen's built-in libraries aren't listed.
+    files: Vec<(PathBuf, Option<SystemTime>)>,
 }
 
 impl Imports {
@@ -32,12 +36,17 @@ impl Imports {
         let base = doc.path.as_deref().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default();
         for (alias, uri) in list {
             let Some(uri) = uri.as_str() else { continue };
-            match load_uri(&base, uri) {
+            match load_uri(&base, uri, &mut out.files) {
                 Ok(d) => out.add(alias, &d),
                 Err(e) => out.errors.push(format!("import '{alias}' ({uri}): {e}")),
             }
         }
         out
+    }
+
+    /// True if an imported file was modified, created or deleted since the imports were loaded.
+    pub fn changed_on_disk(&self) -> bool {
+        self.files.iter().any(|(path, at)| mtime(path) != *at)
     }
 
     fn add(&mut self, alias: &str, d: &Document) {
@@ -101,7 +110,8 @@ fn namespace_values(v: &mut Value, alias: &str) {
     }
 }
 
-fn load_uri(base: &Path, uri: &str) -> Result<Document, String> {
+/// Loads one import, adding a file it reads to `files` with its modified time.
+fn load_uri(base: &Path, uri: &str, files: &mut Vec<(PathBuf, Option<SystemTime>)>) -> Result<Document, String> {
     if let Some(name) = uri.strip_prefix("pencil:") {
         let bytes = pen_library(name).ok_or("Pen's built-in libraries need a local Pen install")?;
         let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
@@ -109,7 +119,13 @@ fn load_uri(base: &Path, uri: &str) -> Result<Document, String> {
     }
     let rel: String = uri.split('/').map(percent_decode).collect::<Vec<_>>().join("/");
     let path = base.join(rel);
+    // Taken before reading, so a write that races the read shows up as a change next time.
+    files.push((path.clone(), mtime(&path)));
     Document::load(&path).map_err(|e| format!("{e:#}"))
+}
+
+fn mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 fn percent_decode(s: &str) -> String {
