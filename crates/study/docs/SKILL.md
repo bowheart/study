@@ -19,6 +19,7 @@ each `execute` call with Ctrl+Z.
 | Components | Reusable components, instances, overrides | [components.md](./components.md) |
 | Layout | Sizing rules, text sizing, common layout mistakes | [layout.md](./layout.md) |
 | Scripts, shaders, imports | Script nodes, shader fills (time, mouse, textures, SDF, backdrop), imported files | [scripts-and-shaders.md](./scripts-and-shaders.md) |
+| Browser | Import a live page as layers, read DOM/styles, screenshot a site | [browser.md](./browser.md) |
 
 ## Working rules
 

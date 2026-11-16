@@ -8,6 +8,7 @@
 #![cfg_attr(not(feature = "gui"), allow(dead_code))]
 
 mod api;
+mod browser;
 mod docs;
 mod engine;
 mod export;

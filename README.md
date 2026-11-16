@@ -4,7 +4,8 @@ A fast, local canvas for [Pen](https://pen.dev) `.pen` design files, built for C
 
 study opens your existing `.pen` files exactly as they are, renders them the way Pen does, and
 gives Claude Code the same MCP tools Pen does (`get_app_state`, `execute`, `read_skill`,
-`get_style`). It skips the manual editing UI: you pan, zoom and select; Claude does the designing.
+`get_style`, `browser`). It skips the manual editing UI: you pan, zoom and select; Claude does the
+designing.
 
 <p align="center"><img src="assets/icon-256.png" width="96" alt="study logo"></p>
 
@@ -134,6 +135,10 @@ This works, but Claude then sees two near-identical tool sets and may pick the w
   image service; study has none, so Claude writes the SVG itself and study turns it into path
   nodes. Image generation and stock photos (`"ai"`, `"stock"`) aren't available.
 - `get_style` serves style guides you write as markdown files in `~/.study/styles/`.
+- `browser` drives a real Chrome/Chromium over the DevTools Protocol: load a live page, import it
+  as editable layers, screenshot it, read its DOM and computed styles, or send raw CDP commands.
+  It runs headless, so it works on a server, and keeps a profile in `~/.study/browser`. See
+  [crates/study/docs/browser.md](crates/study/docs/browser.md) for the mapping and limits.
 
 ## Using the window
 
@@ -197,7 +202,7 @@ your optional `styles/`. Deleting it is safe. Set `STUDY_DATA_DIR` to use anothe
 
 ## Not supported
 
-- Image generation and stock photos (`Generate` with `"ai"` / `"stock"`), and Pen's `browser` tool.
+- Image generation and stock photos (`Generate` with `"ai"` / `"stock"`).
 - Pen's manual editing tools, panels, in-app chat, presets, sharing, presenting and Figma import.
 - Script nodes that use `Math.random()` produce the same *kind* of output as in Pen but not the
   identical shapes (the random seed differs).

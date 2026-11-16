@@ -109,13 +109,25 @@ style (variables and themes applied, instances expanded) plus computed rects and
   node with geometry translated to its own box and an explicit `viewBox`, fitted into the frame
   (centered, aspect kept); gradients are re-expressed in Pen's normalized form; the frame's
   layout is set to `none`.
+- `browser/` (the `browser` tool): a Chrome/Chromium child process with `--remote-debugging-port`,
+  reached over CDP (`cdp.rs`: `/json/version` discovery, then one flattened page session on a
+  WebSocket). `dom.js` captures the target element as JSON (page-coordinate rects, a curated set of
+  computed styles, text runs, image sources, inline SVG); `convert.rs` turns that into pen nodes.
+  The rule that keeps imports faithful: only containers whose children form one clean run (ordered,
+  non-overlapping, equal gaps, same cross start) become flex layouts with measured `gap`/`padding`;
+  everything else keeps absolute `x`/`y`, which cannot drift. `css.rs` parses colours, gradients
+  (CSS angle → pen rotation: `180deg` = 0), shadows, radii and text metrics. Images download into
+  `<document>.assets/` named by content hash; inline SVG goes through `svg::to_nodes`. The tool
+  respects `STUDY_FETCH_HOSTS` and `pen::access`; `STUDY_BROWSER`, `STUDY_BROWSER_HEADED`,
+  `STUDY_BROWSER_ARGS` and `STUDY_NO_BROWSER` control it. Canvas results are inserted with an
+  ordinary `execute` snippet, so they are validated, undoable and saved like any other edit.
 - `mcp.rs`: JSON-RPC over stdio, tool schemas mirror Pen's. Routing per call: a window that has the
   file open → forward over IPC; else launch a detached window for the file and wait for it to
   register (≤20 s); else (or with `STUDY_HEADLESS`) open the document in-process.
 - `ipc.rs`: each window listens on 127.0.0.1 with a random port + token and writes
   `~/.study/instances/<pid>.json` (open file, focus time). Stale entries are pruned by pid.
 - Headless build: everything window-related (`gui.rs`, `uitext.rs`, `updater.rs`, winit/glutin/muda/
-  rfd/ureq) is behind the default `gui` feature. `--no-default-features` builds the MCP server
+  rfd) is behind the default `gui` feature; `ureq` is shared (the browser tool needs it). `--no-default-features` builds the MCP server
   alone (the Linux release): it never launches windows and refuses `study <file>`.
 - `gui.rs`: winit + glutin GL surface wrapped as a Skia surface; muda native menu bar with
   accelerators: on macOS they are real key equivalents (winit never sees those keys); on Windows
@@ -252,6 +264,7 @@ style (variables and themes applied, instances expanded) plus computed rects and
 
 ## Known gaps
 
-Image generation / stock photos, the `browser` tool, exact parity of seeded randomness in scripts.
+Image generation / stock photos, exact parity of seeded randomness in scripts, and live browser
+nodes (study imports a snapshot rather than keeping a page attached to the canvas).
 macOS is built and tested in CI but has not been exercised by an agent on a real Mac. Memory is ~2.5 GB for 920K nodes (per-node JSON maps) — the
 first thing to optimize if huge files become common.

@@ -1,9 +1,11 @@
 //! `study mcp`: the stdio MCP server. Tool calls go to the study window that has
 //! the document open (launching one if needed), or run headless in-process.
 
+use crate::browser::{self, Reply};
 use crate::engine::Engine;
 use crate::ipc::{self, Instance};
 use crate::{docs, tools};
+use base64::Engine as _;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -13,7 +15,8 @@ use std::time::{Duration, Instant};
 const INSTRUCTIONS: &str = "This MCP server drives study, a local infinite-canvas viewer for .pen design files (the pen.dev format). \
 Use it to read, generate, and validate designs. Call get_app_state first: it reports the open document, the user's selection, \
 and includes the execute API reference. Make all document changes through the execute tool so the canvas updates live and \
-the user can undo them; avoid editing .pen files on disk directly while study has them open.";
+the user can undo them; avoid editing .pen files on disk directly while study has them open. The browser tool drives a headless \
+Chrome/Chromium: load a page, read it, screenshot it, or import it as editable layers.";
 
 pub fn tool_list() -> Value {
     json!([
@@ -50,6 +53,28 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "browser",
+            "description": "Interact with a real website loaded in Chrome/Chromium: open a URL, reproduce a page (or one element) as editable canvas layers, screenshot it, or pull its DOM and computed styles back into the conversation.\n\nUse it to iterate on real designs: import a live page onto the canvas, take inspiration from a site, or close the loop when generating a design — load the generated page, look at it, and refine.\n\nParameters:\n- action (required):\n  - \"load-page\": load \"url\" and wait for it. Returns the title, final URL and sizes. Optional \"waitFor\" (CSS selector) and \"viewport\" {width, height}.\n  - \"import-to-canvas\": reproduce the target as editable pen layers on the canvas. The response reports the imported frame's id for use with execute.\n  - \"screenshot-to-canvas\": place a screenshot of the target on the canvas as an image.\n  - \"return-element\": return the target's DOM and computed styles as text so you can read or reuse them.\n  - \"return-screenshot\": return a screenshot of the target as an image so you can look at it.\n  - \"evaluate\": run params.expression in the page and return its JSON value (study extension).\n  - \"cdp\": send one Chrome DevTools Protocol command (\"method\" + \"params\") to the page and return the result as JSON text (a Page.captureScreenshot result comes back as an image). Use it to act inside the page: click, type, scroll, navigate.\n  - \"close\": close the browser (study extension).\n- target (default \"full-page\"): \"full-page\" the whole page, \"query\" the element resolved from querySelector. \"selection\" needs a visible browser window, which a headless browser does not have — use query.\n- querySelector: a CSS selector, required when target is \"query\".\n- url: an http(s), file or data URL, used only by load-page.\n- method / params: the CDP method and its parameters, used only by cdp and evaluate.\n- nodeId: insert the result into this frame instead of at a free spot on the page.\n- timeout: milliseconds to wait for a load or selector (default 30s).\n- filePath: the .pen document the result belongs to (assets are saved beside it). Defaults to the open document.\n\nUsage:\n- Call \"load-page\" before the other actions so a page is loaded.\n- Prefer target \"query\" to keep imports and reads focused.\n- Only the DOM, Input, Page, Runtime, Emulation, CSS, Accessibility, Network, Log and Overlay domains are available through cdp; do not send Escape (the editor intercepts it). Setting STUDY_NO_BROWSER=1 disables the tool; STUDY_BROWSER=<path> picks the browser; STUDY_BROWSER_HEADED=1 shows it; STUDY_FETCH_HOSTS limits which sites it may reach.",
+            "inputSchema": {
+                "type": "object",
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "properties": {
+                    "action": {"type": "string", "enum": ["load-page", "import-to-canvas", "screenshot-to-canvas", "return-element", "return-screenshot", "evaluate", "cdp", "close"]},
+                    "filePath": {"type": "string", "description": "The .pen document the result belongs to; assets are saved beside it. Defaults to the open document."},
+                    "nodeId": {"type": "string", "description": "Insert the imported layers or screenshot into this frame instead of at a free spot on the page."},
+                    "target": {"type": "string", "enum": ["full-page", "selection", "query"], "description": "What to act on (default full-page)."},
+                    "querySelector": {"type": "string", "description": "A CSS selector executed in the page. Required when target is \"query\"."},
+                    "url": {"type": "string", "description": "An http(s), file or data URL. Used when action is \"load-page\"."},
+                    "viewport": {"type": "object", "properties": {"width": {"type": "number"}, "height": {"type": "number"}}, "description": "Page size for load-page, e.g. {\"width\": 1440, \"height\": 900}."},
+                    "waitFor": {"type": "string", "description": "A CSS selector to wait for after load-page (for pages that render late)."},
+                    "timeout": {"type": "number", "description": "Milliseconds to wait for a load or selector (default 30000)."},
+                    "method": {"type": "string", "description": "A CDP method, e.g. \"Input.dispatchMouseEvent\". Required when action is \"cdp\"."},
+                    "params": {"type": "object", "additionalProperties": {}, "description": "The CDP command's parameters for method, e.g. {\"expression\": \"document.title\", \"returnByValue\": true} for Runtime.evaluate; for evaluate, {\"expression\": \"...\"}."}
+                },
+                "required": ["action"]
+            }
+        },
+        {
             "name": "read_skill",
             "description": "Read the study skill that teaches how to design on the canvas.\n\nUsage:\n1. read_skill(): returns the skill's SKILL.md\n2. read_skill({ path }): read a file referenced from SKILL.md (e.g. \"execute.md\", \"pen-schema.md\")",
             "inputSchema": {
@@ -75,10 +100,11 @@ pub fn tool_list() -> Value {
 
 struct Server {
     headless: HashMap<String, Engine>,
+    browser: browser::Session,
 }
 
 pub fn run() {
-    let mut server = Server { headless: HashMap::new() };
+    let mut server = Server { headless: HashMap::new(), browser: browser::Session::default() };
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
@@ -112,7 +138,14 @@ pub fn run() {
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
                 Some(server.call(&name, &args))
             }
-            "resources/list" => Some(json!({"resources": []})),
+            "resources/list" => Some(json!({"resources": docs::resources()})),
+            "resources/read" => {
+                let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
+                Some(match docs::resource(uri) {
+                    Some((name, text)) => json!({"contents": [{"uri": uri, "name": name, "mimeType": "text/markdown", "text": text}]}),
+                    None => json!({"contents": [], "isError": true}),
+                })
+            }
             "prompts/list" => Some(json!({"prompts": []})),
             _ => None,
         };
@@ -134,20 +167,68 @@ impl Server {
             "get_app_state" => self.app_state(),
             "execute" => {
                 let file = args.get("filePath").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).map(PathBuf::from);
-                match self.route(file.as_deref()) {
-                    Route::Window(inst) => ipc::send(&inst, "execute", args).unwrap_or_else(|e| ipc::tool_error(&format!("study window error: {e}"))),
-                    Route::Headless(key) => {
-                        let engine = self.headless.get_mut(&key).unwrap();
-                        engine.reload_if_changed();
-                        let result = tools::execute(engine, args);
-                        record_presence(engine, file.as_deref());
-                        result
-                    }
-                    Route::Error(e) => ipc::tool_error(&e),
-                }
+                self.run_args(file.as_deref(), args.clone())
             }
-            "browser" => ipc::tool_error("The browser tool is not available in study."),
+            "browser" => self.browser_call(args),
             _ => ipc::tool_error(&format!("unknown tool {name}")),
+        }
+    }
+
+    /// Runs an `execute` call against the document that `file` names (or the routed default).
+    fn run_args(&mut self, file: Option<&Path>, args: Value) -> Value {
+        match self.route(file) {
+            Route::Window(inst) => ipc::send(&inst, "execute", &args).unwrap_or_else(|e| ipc::tool_error(&format!("study window error: {e}"))),
+            Route::Headless(key) => {
+                let engine = self.headless.get_mut(&key).unwrap();
+                engine.reload_if_changed();
+                let result = tools::execute(engine, &args);
+                record_presence(engine, file);
+                result
+            }
+            Route::Error(e) => ipc::tool_error(&e),
+        }
+    }
+
+    /// The `browser` tool. Page work happens in this process; canvas results go through
+    /// `run_args` so they are validated, undoable and saved like any other execute call.
+    fn browser_call(&mut self, args: &Value) -> Value {
+        let action = args.get("action").and_then(Value::as_str).unwrap_or("").to_string();
+        let given = args.get("filePath").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).map(PathBuf::from);
+        let doc = given
+            .clone()
+            .map(|p| absolute(&p))
+            .or_else(|| ipc::instances().into_iter().find_map(|w| w.file))
+            .or_else(|| self.headless.values().find_map(|e| e.path().map(|p| p.to_path_buf())));
+        let needs_doc = matches!(action.as_str(), "import-to-canvas" | "screenshot-to-canvas");
+        let doc = match doc {
+            Some(d) => d,
+            None if needs_doc => return ipc::tool_error("Open a .pen document first, or pass `filePath`."),
+            None => PathBuf::from("."),
+        };
+        let reply = match self.browser.call(&action, args, &doc) {
+            Ok(r) => r,
+            Err(e) => return ipc::tool_error(&format!("browser: {e:#}")),
+        };
+        match reply {
+            Reply::Text(t) => text(t),
+            Reply::Image(png) => json!({
+                "content": [{"type": "image", "data": base64::engine::general_purpose::STANDARD.encode(png), "mimeType": "image/png"}],
+                "isError": false
+            }),
+            Reply::Canvas { node, note } => {
+                let parent = args.get("nodeId").and_then(Value::as_str);
+                let snippet = match insert_snippet(&node, parent) {
+                    Ok(s) => s,
+                    Err(e) => return ipc::tool_error(&e),
+                };
+                let r = self.run_args(given.as_deref(), json!({"input": snippet}));
+                let mut content = r["content"].as_array().cloned().unwrap_or_default();
+                if let Some(first) = content.first_mut() {
+                    let old = first["text"].as_str().unwrap_or("");
+                    first["text"] = json!(format!("{note}\n\n{old}"));
+                }
+                json!({"content": content, "isError": r["isError"].clone()})
+            }
         }
     }
 
@@ -187,6 +268,9 @@ impl Server {
             }
         } else {
             out.push_str("No study window is open and no document is loaded. Pass a .pen file path as `filePath` to execute; study opens it in a window.\n");
+        }
+        if let Some(s) = self.browser.status() {
+            out.push_str(&format!("\n{s}\n"));
         }
         out.push_str("\n");
         out.push_str(&docs::app_state_docs());
@@ -282,6 +366,19 @@ fn record_presence(engine: &mut Engine, given: Option<&Path>) {
     if let Err(e) = written {
         eprintln!("study: could not write STUDY_EVENTS ({}): {e}", PathBuf::from(log).display());
     }
+}
+
+/// A snippet that inserts a browser result. Without a parent it lands in free space.
+fn insert_snippet(node: &Value, parent: Option<&str>) -> Result<String, String> {
+    let w = node.get("width").and_then(Value::as_f64).unwrap_or(800.0);
+    let h = node.get("height").and_then(Value::as_f64).unwrap_or(600.0);
+    let json = serde_json::to_string(node).map_err(|e| e.to_string())?;
+    Ok(match parent {
+        Some(p) => format!("const node = {json};\nnode.x = 0;\nnode.y = 0;\nid = Insert({p:?}, node);\nPrint(id);"),
+        None => format!(
+            "const pos = FindEmptySpace({{width: {w}, height: {h}, padding: 80}});\nconst node = {json};\nnode.x = pos.x;\nnode.y = pos.y;\nid = Insert(document, node);\nPrint(id);"
+        ),
+    })
 }
 
 fn absolute(p: &Path) -> PathBuf {

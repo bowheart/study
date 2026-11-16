@@ -9,6 +9,7 @@ const FILES: &[(&str, &str)] = &[
     ("components.md", include_str!("../docs/components.md")),
     ("layout.md", include_str!("../docs/layout.md")),
     ("scripts-and-shaders.md", include_str!("../docs/scripts-and-shaders.md")),
+    ("browser.md", include_str!("../docs/browser.md")),
 ];
 
 pub fn read(path: Option<&str>) -> String {
@@ -21,6 +22,28 @@ pub fn read(path: Option<&str>) -> String {
             FILES.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
         ),
     }
+}
+
+/// Skill files as MCP resources, so a client can list and read them without a tool call.
+pub fn resources() -> Vec<Value> {
+    FILES
+        .iter()
+        .map(|(name, text)| {
+            serde_json::json!({
+                "uri": format!("study://skill/{name}"),
+                "name": name.trim_end_matches(".md"),
+                "description": text.lines().find(|l| !l.trim().is_empty() && !l.starts_with("---")).unwrap_or("").trim_start_matches('#').trim(),
+                "mimeType": "text/markdown",
+            })
+        })
+        .collect()
+}
+
+/// The text behind a `study://skill/<name>` URI.
+pub fn resource(uri: &str) -> Option<(String, String)> {
+    let path = uri.strip_prefix("study://skill/")?;
+    let want = path.trim_start_matches("./");
+    FILES.iter().find(|(name, _)| name.eq_ignore_ascii_case(want)).map(|(name, text)| (name.trim_end_matches(".md").to_string(), text.to_string()))
 }
 
 /// The reference material included with get_app_state.

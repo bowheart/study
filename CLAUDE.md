@@ -19,7 +19,7 @@ read the relevant section before changing file I/O, layout, rendering, the execu
 - `crates/study` — the binary: window + menus (`gui.rs`), MCP stdio server (`mcp.rs`), IPC between
   MCP process and windows (`ipc.rs`), shared document state (`engine.rs`), QuickJS execute API
   (`api.rs` + `prelude.js`), `script` node runner (`scripts.rs`), SVG import for `Generate` (`svg.rs`),
-  screenshots/export/HTML.
+  screenshots/export/HTML, and the `browser` tool (`browser/`, Chrome over CDP).
 - `crates/web` — the browser viewer: `pen` + `render` compiled to WebAssembly (Emscripten, WebGL2),
   `js/study-viewer.js` is the API pages use (documented in `crates/web/README.md`). Not a default
   workspace member; build with its `build.sh`. Script wrapping (`pen::script`) and hit-testing

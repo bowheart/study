@@ -10,6 +10,22 @@ pub fn get(url: String, limit: u64, done: impl FnOnce(Reply) + Send + 'static) {
     imp::get(url, limit, Box::new(done));
 }
 
+/// Whether a URL may be fetched under `STUDY_FETCH_HOSTS` (true when the variable is unset).
+pub fn url_allowed(url: &str) -> bool {
+    #[cfg(not(target_arch = "emscripten"))]
+    {
+        match imp::allowed_hosts() {
+            None => true,
+            Some(hosts) => imp::host_allowed(url, hosts),
+        }
+    }
+    #[cfg(target_arch = "emscripten")]
+    {
+        let _ = url;
+        true
+    }
+}
+
 /// Native builds honor `STUDY_FETCH_HOSTS`: a comma-separated list of hosts study may contact
 /// (`*.example.com` for subdomains too). When it's set, anything else, redirects included, fails
 /// without a request, and an empty value blocks all network access. `HTTPS_PROXY`, `HTTP_PROXY`,
@@ -18,7 +34,7 @@ pub fn get(url: String, limit: u64, done: impl FnOnce(Reply) + Send + 'static) {
 mod imp {
     use std::sync::OnceLock;
 
-    fn allowed_hosts() -> Option<&'static [String]> {
+    pub(super) fn allowed_hosts() -> Option<&'static [String]> {
         static HOSTS: OnceLock<Option<Vec<String>>> = OnceLock::new();
         HOSTS
             .get_or_init(|| {
