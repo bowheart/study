@@ -438,7 +438,10 @@ A document can refer to files by relative path: image fills, shader sources, `sc
 sources and `imports` of other `.pen` files. Before `load` lays a document out, it asks
 `options.readFile(path)` for each file it doesn't have yet. Paths are relative to your app's root
 and resolved from the document's `path`. Return a `Uint8Array`, `ArrayBuffer` or string, or
-`null` if the file doesn't exist. Imported documents are scanned for their own files too.
+`null` if the file doesn't exist. Imported documents are scanned for their own files too,
+including their own `imports`, each relative to the file that lists it. An import that can't be
+loaded, or a reference to an alias its file doesn't import, produces a `warning` like
+`import 'ui' → 'base' (tokens.lib.pen): ...`.
 
 `viewer.addFile(path, data)` provides or replaces a file directly, for example after the agent
 regenerates an image. Without `readFile`, files can only arrive through `addFile`.

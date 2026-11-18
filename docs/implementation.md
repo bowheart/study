@@ -42,12 +42,18 @@ style (variables and themes applied, instances expanded) plus computed rects and
 - Legacy forms still found in files: stroke objects `{align, thickness, fill}`, `icon_font` nodes.
 - Imports (`imports.rs`): the header's `imports` maps aliases to other files (relative, percent-
   encoded) or `pencil:<kit>.lib.pen` (read straight out of a local Pen install's `app.asar`). Every
-  node of an import is pre-serialized as `alias:id` with nested refs and `$vars` rewritten to
-  `alias:...`; refs that miss locally compile from that JSON. Variables are merged into `Vars` as
-  `alias:name`. Pen's own reference syntax is undocumented; bare ids/names that exist in an import
-  also resolve. `Imports` keeps each imported file's mtime from when it was read; when only those
-  change, `Engine::reload_if_changed` rebuilds the imports and `Vars` and recompiles every root,
-  keeping the document and its undo history. It runs before each `execute`, on `get_app_state`
+  imported file's own imports are followed breadth-first, each relative to that file, and every
+  file gets a scope prefix (`ui:`, then `ui:base:`). Its nodes are pre-serialized as `scope:id`
+  with refs and `$vars` rewritten into its own imports' scopes (`base:x` → `ui:base:x`, bare `x`
+  → `ui:x`); an alias the file doesn't import is left as written and reported in `errors` unless
+  it resolves anyway. A file reached twice (shared or cyclic, keyed by normalized path) is read
+  once and keeps its first scope; the document itself is the empty scope. Refs that miss locally
+  compile from that JSON, and variables are merged into `Vars` as `scope:name`. Shorter names
+  also resolve (`imports::short_names`: the endings `base:x`, `x` and outer scopes `ui:x`), for
+  Pen's undocumented syntax and libraries that name their imports' parts bare.
+  `Imports` keeps each imported file's mtime (nested ones too) from when it was read; when only
+  those change, `Engine::reload_if_changed` rebuilds the imports and `Vars` and recompiles every
+  root, keeping the document and its undo history. It runs before each `execute`, on `get_app_state`
   and on a window's ~1 s disk poll.
 - Script nodes compile as empty containers (`Kind::Script`). After layout the engine runs each
   script with its laid-out size (`study::scripts`) and `graft`s the returned JSON in as children

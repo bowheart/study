@@ -47,3 +47,9 @@ node. Annotate uniforms in a doc comment above them:
 A document's top-level `imports` maps aliases to other .pen files (`{"ui": "kit.lib.pen"}`).
 Instance an imported component with `{type: "ref", ref: "ui:componentId"}` and use its variables
 as `"$ui:name"`. Imported files are read-only from here; edit them in their own file.
+
+Imported files can have imports of their own (tokens → components → app). Each resolves relative
+to the file that lists it, and a library's `base:...` references use its own `base` import, so a
+document only imports what it uses directly. The library's own imports are reachable through it
+too: `ui:base:swatch`, `$ui:base:brand`. Imports that fail to load, and references to an alias a
+file doesn't import, are listed in `get_app_state` as import problems.

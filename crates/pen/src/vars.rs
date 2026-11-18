@@ -71,8 +71,8 @@ impl Vars {
     }
 
     fn lookup<'a>(&'a self, name: &str, theme: &Theme) -> Option<&'a Value> {
-        // Imported variables are `alias:name`; a bare name may also live in one import.
-        let def = self.defs.get(name).or_else(|| self.defs.iter().find(|(k, _)| k.split_once(':').is_some_and(|(_, n)| n == name)).map(|(_, v)| v))?;
+        // Imported variables are `scope:name`; a shorter name (see `imports::short_name_of`) also finds one.
+        let def = self.defs.get(name).or_else(|| self.defs.iter().find(|(k, _)| crate::imports::short_name_of(k, name)).map(|(_, v)| v))?;
         let value = def.get("value")?;
         match value {
             Value::Array(entries) => pick_themed(entries, theme),
