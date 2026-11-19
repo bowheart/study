@@ -204,7 +204,7 @@ impl Layer {
     }
 
     fn version(&self) -> pen::diff::Version<'_> {
-        pen::diff::Version { doc: &self.doc, scenes: &self.scenes }
+        pen::diff::Version { doc: &self.doc, vars: &self.vars, scenes: &self.scenes }
     }
 }
 

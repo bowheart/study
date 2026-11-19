@@ -305,9 +305,11 @@ impl Changes {
         self.specs = keyed.into_iter().map(|(_, s)| s).collect();
         let [added, changed, removed] = self.opts.colors;
         // A row's own frame only when its own properties changed: that it grew or moved, its
-        // header says, and tinting all of it would hide what changed inside.
+        // header says, and tinting all of it would hide what changed inside. A renamed layer
+        // looks the same, so it's listed in `props` but not outlined.
         let row_frame = |id: &str| self.specs.iter().any(|s| s.id == id);
-        let changed_ids = d.changed.iter().filter(|c| !c.props.is_empty() || !row_frame(&c.id)).map(|c| c.id.clone()).collect();
+        let drawn = |c: &pen::diff::Change| c.props.iter().any(|p| p != "name") || (c.visible() && !row_frame(&c.id));
+        let changed_ids = d.changed.iter().filter(|c| drawn(c)).map(|c| c.id.clone()).collect();
         self.marks = vec![
             (Side::After, added, d.added),
             (Side::After, changed, changed_ids),

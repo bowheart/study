@@ -6,9 +6,16 @@
 //! sees layout: a node whose laid-out box changed while its own properties didn't (pushed by a
 //! sibling, resized by flex, changed through its component) is reported too. Nodes a `script` node
 //! generated have no stable identity and are left out.
+//!
+//! Property values are compared resolved: `$variables` through each version's own variables, in
+//! the theme the node renders with, and colours by value (`#fff` is `#FFFFFF`). So a variable
+//! whose value changed reports every node that uses it, and a renamed variable with the same
+//! value reports nothing.
 
 use crate::instance::expand;
 use crate::scene::{Rect, RootScene, NONE};
+use crate::style::Rgba;
+use crate::vars::{apply_theme, Theme, Vars};
 use crate::{Document, NodeId};
 use serde_json::{Map, Value};
 use std::borrow::Cow;
@@ -40,9 +47,18 @@ pub struct Change {
     pub bounds: Option<(Rect, Rect)>,
 }
 
-/// One version: the document and its compiled, laid-out top-level nodes.
+impl Change {
+    /// Whether the change shows when drawn: anything but a renamed layer.
+    pub fn visible(&self) -> bool {
+        self.moved || self.bounds.is_some() || self.props.iter().any(|p| p != "name")
+    }
+}
+
+/// One version: the document, its variables (with its imports'), and its compiled, laid-out
+/// top-level nodes.
 pub struct Version<'a> {
     pub doc: &'a Document,
+    pub vars: &'a Vars,
     pub scenes: &'a HashMap<NodeId, RootScene>,
 }
 
@@ -52,6 +68,9 @@ struct Entry<'a> {
     children: Vec<usize>,
     root: usize,
     props: Cow<'a, Map<String, Value>>,
+    /// The theme it renders with: the document's default, with its own and its ancestors'
+    /// `theme` properties applied.
+    theme: Theme,
     bounds: Rect,
 }
 
@@ -86,7 +105,7 @@ pub fn compare(before: &Version, after: &Version) -> Diff {
             continue;
         };
         let o = &a.entries[old];
-        let props = changed_props(&o.props, &e.props);
+        let props = changed_props((&o.props, before.vars, &o.theme), (&e.props, after.vars, &e.theme));
         let parent_key = |n: &Nodes, x: &Entry| x.parent.map(|p| n.entries[p].key.clone());
         let moved = parent_key(&a, o) != parent_key(&b, e) || moved.contains(e.key.as_str());
         // A box change counts when the node moved within its parent or resized, not when it
@@ -120,12 +139,38 @@ fn same_rect(a: &Rect, b: &Rect) -> bool {
     (a.x - b.x).abs() < EPS && (a.y - b.y).abs() < EPS && (a.w - b.w).abs() < EPS && (a.h - b.h).abs() < EPS
 }
 
-/// Property names whose values differ, the newer version's order first.
-fn changed_props(a: &Map<String, Value>, b: &Map<String, Value>) -> Vec<String> {
+/// One side of a comparison: a node's properties, its version's variables, and its theme.
+type Side<'s> = (&'s Map<String, Value>, &'s Vars, &'s Theme);
+
+/// Property names whose resolved values differ, the newer version's order first.
+fn changed_props(a: Side, b: Side) -> Vec<String> {
     let skip = |k: &str| k == "children" || k == "id";
-    let mut out: Vec<String> = b.iter().filter(|(k, v)| !skip(k) && a.get(*k) != Some(*v)).map(|(k, _)| k.clone()).collect();
-    out.extend(a.keys().filter(|k| !skip(k) && !b.contains_key(*k)).cloned());
+    let differs = |k: &str, v: &Value| match a.0.get(k) {
+        None => true,
+        // Equal as written can still differ: `$accent` may have a new value.
+        Some(old) => rendered(k, old, a.1, a.2) != rendered(k, v, b.1, b.2),
+    };
+    let mut out: Vec<String> = b.0.iter().filter(|(k, v)| !skip(k) && differs(k, v)).map(|(k, _)| k.clone()).collect();
+    out.extend(a.0.keys().filter(|k| !skip(k) && !b.0.contains_key(*k)).cloned());
     out
+}
+
+/// A property's value as it renders: variables resolved, colours spelled one way.
+fn rendered(key: &str, v: &Value, vars: &Vars, theme: &Theme) -> Value {
+    match v {
+        Value::String(s) if s.starts_with('$') => match vars.resolve(v, theme) {
+            // Not a variable (or a missing one): the text itself.
+            Value::Null => v.clone(),
+            // A chain too long to follow.
+            Value::String(r) if r.starts_with('$') => Value::String(r.clone()),
+            r => rendered(key, r, vars, theme),
+        },
+        // Text that happens to look like a colour stays text.
+        Value::String(s) if key != "content" => Rgba::parse(s).map_or_else(|| v.clone(), |c| Value::String(c.hex())),
+        Value::Array(a) => Value::Array(a.iter().map(|x| rendered(key, x, vars, theme)).collect()),
+        Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (k.clone(), rendered(k, x, vars, theme))).collect()),
+        other => other.clone(),
+    }
 }
 
 /// Keys of nodes whose order among their siblings changed: for each parent in both versions,
@@ -187,10 +232,14 @@ fn collect<'a>(v: &Version<'a>) -> Nodes<'a> {
             }
         }
         let mut entry_of = vec![usize::MAX; s.nodes.len()];
+        // The theme each scene node renders with (parents come before their children).
+        let mut themes: Vec<Theme> = Vec::with_capacity(s.nodes.len());
         let mut root = usize::MAX;
         for (i, n) in s.nodes.iter().enumerate() {
+            let inherited = if n.parent == NONE { &v.vars.default_theme } else { &themes[n.parent as usize] };
             let key = n.key();
             if key.is_empty() || (n.src.is_none() && n.path.is_none()) || nodes.by_key.contains_key(key) {
+                themes.push(inherited.clone());
                 continue;
             }
             let mut p = n.parent;
@@ -205,6 +254,8 @@ fn collect<'a>(v: &Version<'a>) -> Nodes<'a> {
                     None => Cow::Owned(Map::new()),
                 },
             };
+            let theme = apply_theme(inherited, props.get("theme")).unwrap_or_else(|| inherited.clone());
+            themes.push(theme.clone());
             let idx = nodes.entries.len();
             if parent.is_none() {
                 root = idx;
@@ -214,7 +265,7 @@ fn collect<'a>(v: &Version<'a>) -> Nodes<'a> {
             let pts = [m.map(0.0, 0.0), m.map(w, 0.0), m.map(w, h), m.map(0.0, h)];
             let (l, t) = pts.iter().fold((f32::MAX, f32::MAX), |a, p| (a.0.min(p.0), a.1.min(p.1)));
             let (r, btm) = pts.iter().fold((f32::MIN, f32::MIN), |a, p| (a.0.max(p.0), a.1.max(p.1)));
-            nodes.entries.push(Entry { key: key.to_string(), parent, children: Vec::new(), root, props, bounds: Rect::new(l, t, r - l, btm - t) });
+            nodes.entries.push(Entry { key: key.to_string(), parent, children: Vec::new(), root, props, theme, bounds: Rect::new(l, t, r - l, btm - t) });
             if let Some(p) = parent {
                 nodes.entries[p].children.push(idx);
             }

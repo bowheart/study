@@ -224,10 +224,14 @@ style (variables and themes applied, instances expanded) plus computed rects and
   repeat across documents. Script results and arriving fonts rebuild every layer (`pump`).
 - **Compare.** `pen::diff::compare` matches scene nodes by key (instance paths inside
   instances). Properties come from the node's own JSON, or from `instance::expand` for instance
-  nodes, so component edits show where they render. `moved` is a parent change, or not being in
-  the longest run of siblings that kept their order. `bounds` counts only boxes that changed
-  relative to their parent. `compare` waits for `settling()` (font downloads, script runs)
-  through `study_pump`, not frames, because background tabs don't get animation frames.
+  nodes, so component edits show where they render. Values are compared resolved: `$variables`
+  through each version's own `Vars`, in the theme the node renders with (the default theme plus
+  its own and its ancestors' `theme` props, tracked per scene node in `collect`), and colours as
+  parsed `Rgba` (except in `content`). `moved` is a parent change, or not being in the longest run
+  of siblings that kept their order. `bounds` counts only boxes that changed relative to their
+  parent. `Change::visible` is false for a rename alone; `showChanges` doesn't outline those.
+  `compare` waits for `settling()` (font downloads, script runs) through `study_pump`, not
+  frames, because background tabs don't get animation frames.
 - **Changes layout** (`crates/web/src/changes.rs`, `showChanges`). Rows live in *list space*:
   CSS px at zoom 1, as wide as the canvas. The camera moves over list space instead of the
   document, as freely as over a document. Each side of a row is a `Place`: a top-level root of the

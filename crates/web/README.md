@@ -234,7 +234,9 @@ the viewer shows, as laid out and rendered:
 
 Each entry in `changed`:
 
-- **`props`:** the names of properties whose values differ, such as `["fill", "padding"]`.
+- **`props`:** the names of properties whose values differ, such as `["fill", "padding"]`. A
+  renamed layer lists `"name"`; it looks the same, so filter it out if you only want to outline
+  what changed visibly (`showChanges` does).
 - **`moved`:** true if it has a different parent, or a different order among siblings that are
   in both versions. When one node moves to the end of a list, only that node is `moved`.
 - **`bounds`:** `{ before, after }` boxes in document units, when it moved within its parent or
@@ -248,6 +250,10 @@ A JSON diff misses some of what these catch:
   path (`instanceId/childId`).
 - **Instances compared as they render:** editing a component reports a change on every instance
   where it shows. An instance that overrides that property doesn't change, so it isn't reported.
+- **Variables resolved:** values are compared after resolving `$variables` with each version's
+  own variables, in the theme the node is shown in. Changing a variable's value reports every
+  node that uses it, including a change to only its dark value on nodes shown dark. Renaming a
+  variable without changing its value, or writing `#fff` as `#FFFFFF`, reports nothing.
 - **Script output left out:** nodes that `script` nodes generate have no stable ids, so they're
   skipped. The `script` node itself is compared.
 - **Waiting for fonts and scripts:** `compare` waits up to `timeout` ms (default 10000) for fonts
